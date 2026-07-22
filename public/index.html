@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent System Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">⚙</div>
+          <div>
+            Agent System Studio
+            <small>Compose systems · not prompts</small>
+          </div>
+        </div>
+        <div class="top-actions">
+          <span id="modePill" class="pill sim">Simulator</span>
+          <button class="btn btn-ghost btn-sm" id="btnImport">Import</button>
+          <button class="btn btn-sm" id="btnExport" disabled>Export</button>
+          <button class="btn btn-primary btn-sm" id="btnSave" disabled>Save</button>
+        </div>
+      </header>
+
+      <div class="studio" id="studio">
+        <!-- FLEET -->
+        <aside class="fleet">
+          <div class="fleet-wide" style="display: contents">
+            <div class="fleet-head">
+              <h2>Fleet</h2>
+              <p>Your agent systems. Start from intent.</p>
+              <div class="intent-box">
+                <label>Architect model (from your ~/.pi)</label>
+                <select id="sketchModel" class="model-select" style="width:100%;margin-bottom:8px">
+                  <option value="">Loading Pi models…</option>
+                </select>
+                <label>What should this system do?</label>
+                <textarea
+                  id="intentInput"
+                  placeholder="Triage support: classify refund vs bug, draft reply, never refund without me."
+                ></textarea>
+                <div class="intent-actions">
+                  <button class="btn btn-primary btn-sm btn-block" id="btnSketch">
+                    Sketch with model →
+                  </button>
+                </div>
+                <div class="muted" id="modelHint" style="font-size:10px;margin-top:6px">
+                  Uses credentials from ~/.pi/agent/auth.json — not placeholders.
+                </div>
+              </div>
+            </div>
+            <div class="fleet-list" id="fleetList"></div>
+          </div>
+        </aside>
+
+        <!-- STAGE: canvas + inspector -->
+        <main class="stage">
+          <div class="stage-bar">
+            <div class="stage-title">
+              <h1 id="stageName">No system selected</h1>
+              <div class="sub" id="stageMeta">Describe intent on the left, or open a system from the fleet.</div>
+            </div>
+            <div class="stage-actions">
+              <div class="score-chip" id="scoreChip">—</div>
+              <button class="btn btn-sm btn-crit" id="btnDelete" disabled>Delete</button>
+            </div>
+          </div>
+
+          <div class="stage-body" id="stageBody">
+            <div class="welcome" id="welcome">
+              <h2>A demo is a model with a prompt.<br />A product is a model with a system.</h2>
+              <p>
+                Assemble Core + S1–S7 on the canvas. Grant freedom one lane at a time.
+                Run, gate, eval, ship.
+              </p>
+              <button class="btn btn-primary" id="btnWelcomeSketch">Sketch from intent</button>
+              <div class="welcome-quote">
+                Freedom is granted one lane at a time — never all at once. Rule zero: start with the simplest thing that works.
+              </div>
+            </div>
+
+            <div id="systemView" class="hidden">
+              <div class="canvas-wrap">
+                <div class="system-canvas">
+                  <div class="canvas-grid" id="canvasGrid">
+                    <!-- modules injected -->
+                  </div>
+                </div>
+              </div>
+              <section class="inspector" id="inspector">
+                <!-- layer forms injected -->
+              </section>
+            </div>
+          </div>
+        </main>
+
+        <!-- OPERATOR RAIL -->
+        <aside class="op-rail">
+          <div class="op-head">
+            <h2>Live operator</h2>
+            <div class="op-tabs">
+              <button class="active" data-op="run">Run</button>
+              <button data-op="trace">Trace</button>
+              <button data-op="memory">Memory</button>
+              <button data-op="history">History</button>
+            </div>
+          </div>
+
+          <div class="op-body active" id="op-run">
+            <div class="breakers" id="breakers">
+              <div class="breaker" id="bSpend">
+                <div class="k">Spend</div>
+                <div class="v" id="bSpendV">$0 / —</div>
+                <div class="bar"><i id="bSpendBar"></i></div>
+              </div>
+              <div class="breaker" id="bLoops">
+                <div class="k">Loops</div>
+                <div class="v" id="bLoopsV">0 / —</div>
+                <div class="bar"><i id="bLoopsBar"></i></div>
+              </div>
+              <div class="breaker" id="bTime">
+                <div class="k">Status</div>
+                <div class="v" id="bStatusV">idle</div>
+                <div class="bar"><i style="width:0"></i></div>
+              </div>
+            </div>
+
+            <div class="run-box">
+              <textarea id="runMessage" placeholder="User message… e.g. Please refund order 88231"></textarea>
+              <button class="btn btn-primary btn-block" id="btnRun" style="margin-top:8px" disabled>▶ Run system</button>
+            </div>
+
+            <div class="metrics" id="runMetrics">
+              <div class="metric"><div class="k">Turns</div><div class="v" id="mTurns">—</div></div>
+              <div class="metric"><div class="k">Tokens</div><div class="v" id="mTokens">—</div></div>
+              <div class="metric"><div class="k">Cost</div><div class="v" id="mCost">—</div></div>
+              <div class="metric"><div class="k">Stop</div><div class="v" id="mStop">—</div></div>
+            </div>
+
+            <div id="approvalsBox"></div>
+            <div class="muted" style="font-size:11px">Output</div>
+            <div class="output" id="runOutput">Select a system, then run.</div>
+          </div>
+
+          <div class="op-body" id="op-trace">
+            <div class="trace" id="traceList">
+              <div class="muted">Flight recorder appears after a run (S5).</div>
+            </div>
+          </div>
+
+          <div class="op-body" id="op-memory">
+            <div class="muted" style="font-size:12px;margin-bottom:6px">
+              External notes — the pump between working memory and long-term memory.
+            </div>
+            <div id="memoryList" class="muted">No notes yet.</div>
+            <button class="btn btn-sm" id="btnRefreshMem" style="margin-top:8px">Reload memory</button>
+          </div>
+
+          <div class="op-body" id="op-history">
+            <div id="runsList" class="muted">No runs yet.</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- Intent → sketch modal -->
+    <div class="backdrop" id="sketchModal">
+      <div class="modal">
+        <h3>System sketch</h3>
+        <p id="sketchIntro">Designed by your selected Pi model. Review, then create.</p>
+        <div class="field">
+          <label>Architect model</label>
+          <div class="mono" id="sketchModelLabel" style="font-size:12px;color:var(--accent)"></div>
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label>Name</label>
+          <input type="text" id="sketchName" />
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label>Goal</label>
+          <textarea id="sketchGoal" rows="2"></textarea>
+        </div>
+        <div class="sketch-grid" id="sketchGrid"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="sketchCancel">Cancel</button>
+          <button class="btn btn-sm" id="sketchRetry">Re-sketch</button>
+          <button class="btn btn-primary" id="sketchCreate">Create system</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <input type="file" id="importFile" accept="application/json,.json" hidden />
+    <script src="/app.js"></script>
+  </body>
+</html>

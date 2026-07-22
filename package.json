@@ -1,0 +1,20 @@
+{
+  "name": "agent-system-builder",
+  "version": "1.0.0",
+  "description": "No-code agent builder based on the Agent System Design Blueprint (S1–S7)",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "nanoid": "^5.1.0",
+    "uuid": "^11.1.0"
+  }
+}
