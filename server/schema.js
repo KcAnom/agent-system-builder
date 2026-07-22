@@ -285,10 +285,144 @@ export function createEmptyAgent(partial = {}) {
 
     // Ship checklist progress (UI)
     checklist: partial.checklist || {},
+
+    // Sketch provenance (which model designed it, from what intent) — preserved if present
+    ...(partial._sketch ? { _sketch: partial._sketch } : {}),
   };
 }
 
-/** Score how complete / blueprint-aligned an agent is (0–100) */
+// ── Semantic lint ────────────────────────────────────────────
+// Deterministic design checks that presence-booleans can't catch.
+
+const TOOL_NEED_PATTERNS = [
+  {
+    toolId: "read_file",
+    label: "reading/searching workspace files",
+    re: /\b(read|open|inspect|scan|search|locate|examine|explore|list)\b[^.\n]{0,80}\b(files?|folders?|director(?:y|ies)|workspace|artifacts?|codebase|repo(?:sitory)?|disk)\b/i,
+  },
+  {
+    toolId: "write_file",
+    label: "writing files/reports to disk",
+    re: /\b(write|save|persist|create|emit|produce|generate)\b[^.\n]{0,80}\b(files?|report (?:file|to)|audit-report|\.md\b|\.json\b|\.txt\b|to disk|artifact)\b/i,
+  },
+  {
+    toolId: "web_search",
+    label: "searching the web",
+    re: /\b(search|look up|browse|research)\b[^.\n]{0,50}\b(web|internet|online|news)\b/i,
+  },
+  {
+    toolId: "http_request",
+    label: "calling external APIs",
+    re: /\b(call|hit|post to|fetch from|query|invoke)\b[^.\n]{0,50}\b(api|endpoint|webhook|external service)\b/i,
+  },
+];
+
+function agentActionText(agent) {
+  const steps = agent.s1_orchestration?.chainSteps || [];
+  const routes = agent.s1_orchestration?.routes || [];
+  return [
+    agent.core?.goal,
+    agent.core?.exitCondition,
+    ...steps.map((s) => `${s.name || ""} ${s.prompt || ""}`),
+    ...routes.map((r) => r.prompt || ""),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Tools the agent's own step prompts imply it needs but doesn't have. */
+export function detectMissingTools(agent) {
+  const text = agentActionText(agent);
+  const enabled = new Set(agent.s3_tools?.enabledToolIds || []);
+  return TOOL_NEED_PATTERNS.filter(
+    (p) => !enabled.has(p.toolId) && p.re.test(text)
+  ).map(({ toolId, label }) => ({ toolId, label }));
+}
+
+const NEGATIVE_EVAL_RE =
+  /fail|violat|unverif|missing|incomplete|unauthorized|error|refus|reject|absent|negative/i;
+
+/**
+ * Semantic design lint. Returns findings: { id, severity: "error"|"warn", message }.
+ * Empty array = clean.
+ */
+export function lintAgent(agent) {
+  const findings = [];
+  const steps = agent.s1_orchestration?.chainSteps || [];
+  const evals = agent.s5_instruments?.evals || [];
+
+  for (const miss of detectMissingTools(agent)) {
+    findings.push({
+      id: `tool_${miss.toolId}`,
+      severity: "error",
+      message: `Steps imply ${miss.label} but "${miss.toolId}" is not enabled — the agent cannot execute its own plan.`,
+    });
+  }
+
+  if (agent.s1_orchestration?.pattern === "prompt_chaining" && steps.length === 0) {
+    findings.push({
+      id: "chain_empty",
+      severity: "error",
+      message: "Pattern is prompt_chaining but there are no chain steps.",
+    });
+  }
+
+  const turnLimit = agent.s6_power?.turnLimit ?? 0;
+  if (steps.length && turnLimit < steps.length * 2) {
+    findings.push({
+      id: "turns_tight",
+      severity: "warn",
+      message: `turnLimit ${turnLimit} is under 2× the ${steps.length} chain steps — a single tool call per step exhausts it.`,
+    });
+  }
+
+  const maxLoops = agent.s4_guardrails?.breakers?.maxLoops ?? 0;
+  if (steps.length && maxLoops < steps.length) {
+    findings.push({
+      id: "loops_tight",
+      severity: "warn",
+      message: `maxLoops ${maxLoops} is below the ${steps.length} chain steps — the breaker trips before the chain finishes.`,
+    });
+  }
+
+  if (evals.length) {
+    const hasNegative = evals.some(
+      (e) => NEGATIVE_EVAL_RE.test(e.expected || "") || NEGATIVE_EVAL_RE.test(e.name || "")
+    );
+    if (!hasNegative) {
+      findings.push({
+        id: "evals_happy_only",
+        severity: "warn",
+        message: "All evals are happy-path — add at least one that exercises a failure/refusal mode.",
+      });
+    }
+    for (const e of evals) {
+      if (e.expected && !/^contains:/.test(e.expected)) {
+        findings.push({
+          id: `eval_expected_${e.id}`,
+          severity: "warn",
+          message: `Eval "${e.id}" expected "${e.expected}" is not in "contains:<needle>" form — the grader can't check it.`,
+        });
+      }
+    }
+  }
+
+  const worst = agent.s4_guardrails?.worstCase3am || "";
+  if (!worst || worst.length < 40 || /breakers cover it\.?$/i.test(worst.trim())) {
+    findings.push({
+      id: "worst_generic",
+      severity: "warn",
+      message: "3 A.M. worst case is generic — name a concrete failure this agent's tools make possible.",
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Score = 70% structural completeness + 30% semantic lint.
+ * A design whose steps can't execute (lint errors) can no longer show 100.
+ */
 export function scoreAgent(agent) {
   const checks = [
     !!agent.core?.goal,
@@ -311,7 +445,14 @@ export function scoreAgent(agent) {
     agent.s7_chassis?.versionEverything === true,
   ];
   const passed = checks.filter(Boolean).length;
-  return Math.round((passed / checks.length) * 100);
+  const structuralPct = (passed / checks.length) * 100;
+
+  const findings = lintAgent(agent);
+  const errors = findings.filter((f) => f.severity === "error").length;
+  const warns = findings.filter((f) => f.severity === "warn").length;
+  const lintPct = Math.max(0, 100 - errors * 40 - warns * 15);
+
+  return Math.round(structuralPct * 0.7 + lintPct * 0.3);
 }
 
 export function shipChecklist(agent) {

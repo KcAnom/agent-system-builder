@@ -10,6 +10,7 @@ import {
   exportAgentBundle,
   duplicateAgent,
   seedIfEmpty,
+  ensureAuditorAgent,
 } from "./store.js";
 import {
   ORCHESTRATION_PATTERNS,
@@ -17,6 +18,7 @@ import {
   createEmptyAgent,
   scoreAgent,
   shipChecklist,
+  lintAgent,
 } from "./schema.js";
 import {
   runAgent,
@@ -89,6 +91,50 @@ app.post("/api/sketch", async (req, res) => {
   }
 });
 
+/**
+ * Dogfood: audit a sketch with the Unified Compliance Auditor agent —
+ * the sketch is the "delivered work", the intent is the "original instructions".
+ */
+app.post("/api/sketch/audit", async (req, res) => {
+  const { sketch, modelRef } = req.body || {};
+  const intent = sketch?._sketch?.intent || sketch?.intent;
+  if (!sketch || typeof sketch !== "object") {
+    return res.status(400).json({ error: "sketch is required" });
+  }
+  if (!intent) {
+    return res.status(400).json({ error: "sketch has no recorded intent to audit against" });
+  }
+  if (!modelRef) {
+    return res.status(400).json({ error: "modelRef is required" });
+  }
+  try {
+    const auditor = ensureAuditorAgent();
+    const { _sketch, ...deliveredWork } = sketch;
+    const message = [
+      "Audit the following. All inputs are inline below — do not search the workspace for them.",
+      "",
+      "ORIGINAL INSTRUCTIONS (the user's intent, given to an architect model that was asked to design an agent system blueprint from it):",
+      `"""${String(intent).trim()}"""`,
+      "",
+      "DELIVERED WORK (the agent system blueprint JSON the architect produced):",
+      "```json",
+      JSON.stringify(deliveredWork, null, 2),
+      "```",
+      "",
+      "Treat the intent as the original instructions and the blueprint as the delivered work. Return the structured audit report as your final output — do not write it to a file.",
+    ].join("\n");
+    const run = await runAgent(auditor, message, { modelRef });
+    res.json({
+      runId: run.id,
+      status: run.status,
+      output: run.output || "",
+      auditorId: auditor.id,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 app.get("/api/meta/patterns", (_req, res) => {
   res.json(ORCHESTRATION_PATTERNS);
 });
@@ -117,6 +163,7 @@ app.post("/api/agents", (req, res) => {
     agent,
     score: scoreAgent(agent),
     checklist: shipChecklist(agent),
+    lint: lintAgent(agent),
   });
 });
 
@@ -127,6 +174,7 @@ app.get("/api/agents/:id", (req, res) => {
     agent,
     score: scoreAgent(agent),
     checklist: shipChecklist(agent),
+    lint: lintAgent(agent),
   });
 });
 
@@ -137,6 +185,7 @@ app.put("/api/agents/:id", (req, res) => {
     agent,
     score: scoreAgent(agent),
     checklist: shipChecklist(agent),
+    lint: lintAgent(agent),
   });
 });
 

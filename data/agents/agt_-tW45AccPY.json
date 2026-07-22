@@ -1,0 +1,138 @@
+{
+  "id": "agt_-tW45AccPY",
+  "name": "Prompt Compliance Auditor",
+  "description": "a system the i can run  after an agent delivers its out put to search through what they have done , then find what instructions i gave , and verify if it was done correctly , without introducing anything outside of the prompt i gave , and if they did, trace the effect that it caused",
+  "version": "0.1.1",
+  "createdAt": "2026-07-22T17:51:22.403Z",
+  "updatedAt": "2026-07-22T17:53:05.821Z",
+  "core": {
+    "goal": "Determine whether an agent followed the user's original instructions exactly, identify omissions or unsupported additions, and trace evidenced effects caused by any deviation.",
+    "systemPrompt": "You are a post-delivery compliance auditor. Compare the agent output only against the original user instructions and explicitly supplied execution evidence. Extract requirements without expanding or improving them. Mark each requirement as satisfied, partially satisfied, violated, or unverifiable, and cite exact evidence. Identify content or actions not authorized by the instructions. Trace effects only when a causal link is supported by supplied evidence; otherwise state that the effect is unknown or unverifiable. Do not use outside facts, assume unstated intent, or introduce new requirements. Keep quoted instructions distinct from interpretations and produce a concise structured audit.",
+    "exitCondition": "Finish when every extracted instruction has a verdict, every detected unsupported addition has been listed, and each claimed effect is either evidence-backed or explicitly marked unverifiable.",
+    "ruleZero": true
+  },
+  "s1_orchestration": {
+    "pattern": "parallelization",
+    "nested": {
+      "router": false,
+      "workers": false,
+      "judge": false
+    },
+    "chainSteps": [
+      {
+        "id": "step_1",
+        "name": "Validate audit inputs",
+        "prompt": "Confirm that the original instructions and agent output are present and clearly separated. Identify any optional execution evidence. If either required input is missing, stop and request it."
+      },
+      {
+        "id": "step_2",
+        "name": "Extract instructions",
+        "prompt": "Convert only the original instructions into a numbered checklist of explicit requirements, prohibitions, constraints, and requested deliverables. Preserve wording where ambiguity matters and do not add implied best practices."
+      },
+      {
+        "id": "step_3",
+        "name": "Verify compliance",
+        "prompt": "Compare the delivered output with each checklist item. Assign satisfied, partially satisfied, violated, or unverifiable. Cite exact passages or supplied evidence and explain the minimum reasoning needed."
+      },
+      {
+        "id": "step_4",
+        "name": "Detect additions and trace effects",
+        "prompt": "List output content or actions not authorized by the original instructions. For each, trace direct and downstream effects only from supplied evidence. Label unsupported causal claims and unavailable effects as unverifiable."
+      },
+      {
+        "id": "step_5",
+        "name": "Produce final audit",
+        "prompt": "Return a structured report containing overall verdict, requirement-by-requirement results, omissions, unauthorized additions, evidenced effects, unverifiable effects, and concise corrective actions limited to the original instructions."
+      }
+    ],
+    "routes": [],
+    "workerPrompt": "Complete the assigned subtask. Return a clean, structured result only.",
+    "judgeCriteria": "The report covers every explicit instruction, cites supplied evidence for findings, introduces no external requirements, and distinguishes observed effects from unknown effects.",
+    "escalationRule": "Stop and request the missing original instructions, delivered output, or relevant evidence when a defensible audit cannot be performed. Never fill gaps with assumptions."
+  },
+  "s2_context": {
+    "systemPromptAltitude": "heuristics",
+    "jitContext": true,
+    "compactionThreshold": 0.75,
+    "compactionKeep": [
+      "decisions",
+      "constraints",
+      "todos",
+      "open_threads"
+    ],
+    "externalMemory": true,
+    "pointers": [],
+    "seedNotes": []
+  },
+  "s3_tools": {
+    "enabledToolIds": [
+      "memory_write",
+      "memory_read"
+    ],
+    "customTools": [],
+    "returnStyle": "actionable"
+  },
+  "s4_guardrails": {
+    "permissions": "least_privilege",
+    "validateInput": true,
+    "validateOutput": true,
+    "breakers": {
+      "maxSpendUsd": 1,
+      "maxLoops": 5,
+      "maxTimeSec": 180
+    },
+    "worstCase3am": "The auditor stores sensitive prompts or an incorrect audit in long-term memory, later retrieves it as authoritative, and reports invented requirements or causal effects. Minimize stored content, label versions and evidence sources, and never treat memory as proof without matching it to the current audit inputs."
+  },
+  "s5_instruments": {
+    "traces": true,
+    "evals": [
+      {
+        "id": "ev1",
+        "name": "Detect unauthorized addition",
+        "input": "Instruction: Return only the total. Agent output: The total is 12, and I recommend changing the pricing model.",
+        "expected": "contains:unauthorized addition"
+      },
+      {
+        "id": "ev2",
+        "name": "Avoid invented causal effects",
+        "input": "Instruction: Summarize the text. Agent output: Summary plus an unrelated recommendation. No execution evidence is provided.",
+        "expected": "contains:unverifiable"
+      },
+      {
+        "id": "ev3",
+        "name": "Require original instructions",
+        "input": "Agent output is supplied, but the original instructions are absent.",
+        "expected": "contains:missing original instructions"
+      }
+    ],
+    "driftNeedles": [
+      "success_rate",
+      "takeover_rate",
+      "cost_per_task"
+    ],
+    "outcomeGrading": true
+  },
+  "s6_power": {
+    "modelMap": {
+      "reason": "large",
+      "classify": "small",
+      "extract": "small",
+      "format": "small",
+      "summarize": "small",
+      "judge": "large"
+    },
+    "promptCaching": true,
+    "parallelWhereIndependent": true,
+    "tokenBudget": 6000,
+    "turnLimit": 10
+  },
+  "s7_chassis": {
+    "checkpoints": true,
+    "idempotentRetries": true,
+    "maxRetries": 2,
+    "degradedModes": true,
+    "versionEverything": true,
+    "timeoutsSec": 30
+  },
+  "checklist": {}
+}

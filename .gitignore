@@ -6,3 +6,4 @@ node_modules/
 data/runs/
 data/memory/
 data/workspaces/
+data/corrections.jsonl

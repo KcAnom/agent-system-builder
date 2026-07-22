@@ -3,9 +3,11 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
 import { createEmptyAgent, scoreAgent, shipChecklist } from "./schema.js";
+import { AUDITOR_NAME, AUDITOR_SEED } from "./auditor-seed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENTS_DIR = path.join(__dirname, "..", "data", "agents");
+const CORRECTIONS_PATH = path.join(__dirname, "..", "data", "corrections.jsonl");
 
 function ensure() {
   if (!fs.existsSync(AGENTS_DIR)) fs.mkdirSync(AGENTS_DIR, { recursive: true });
@@ -78,7 +80,89 @@ export function updateAgent(id, patch) {
     parts[2] = (parts[2] || 0) + 1;
     merged.version = parts.join(".");
   }
+  // Model-sketched agent edited by hand: log the diff so future sketches
+  // can be told what the user had to fix.
+  if (existing._sketch) logCorrection(existing, merged);
   return saveAgent(merged);
+}
+
+// ── Corrections log (sketch → user-edit diffs) ──────────────
+
+const DIFF_FIELDS = [
+  "name",
+  "description",
+  "core",
+  "s1_orchestration",
+  "s2_context",
+  "s3_tools",
+  "s4_guardrails",
+  "s5_instruments",
+  "s6_power",
+  "s7_chassis",
+];
+
+function clip(v) {
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s === undefined ? "" : s.length > 160 ? s.slice(0, 157) + "…" : s;
+}
+
+function diffLeaves(a, b, prefix, out) {
+  if (out.length >= 15) return;
+  const aObj = a && typeof a === "object" && !Array.isArray(a);
+  const bObj = b && typeof b === "object" && !Array.isArray(b);
+  if (aObj && bObj) {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      diffLeaves(a[k], b[k], prefix ? `${prefix}.${k}` : k, out);
+    }
+    return;
+  }
+  if (JSON.stringify(a) !== JSON.stringify(b)) {
+    out.push({ path: prefix, from: clip(a), to: clip(b) });
+  }
+}
+
+function logCorrection(before, after) {
+  const changes = [];
+  for (const field of DIFF_FIELDS) {
+    diffLeaves(before[field], after[field], field, changes);
+  }
+  if (!changes.length) return;
+  const entry = {
+    ts: new Date().toISOString(),
+    agentId: before.id,
+    name: before.name,
+    sketchModelRef: before._sketch?.modelRef || null,
+    changes,
+  };
+  try {
+    fs.appendFileSync(CORRECTIONS_PATH, JSON.stringify(entry) + "\n");
+  } catch {
+    // corrections are advisory — never fail a save over them
+  }
+}
+
+/** Most recent sketch-correction entries, newest first. */
+export function loadRecentCorrections(n = 5) {
+  try {
+    if (!fs.existsSync(CORRECTIONS_PATH)) return [];
+    return fs
+      .readFileSync(CORRECTIONS_PATH, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .slice(-n)
+      .reverse();
+  } catch {
+    return [];
+  }
 }
 
 export function deleteAgent(id) {
@@ -128,6 +212,17 @@ function deepMerge(a, b) {
     return out;
   }
   return b === undefined ? a : b;
+}
+
+/**
+ * The studio's dogfood auditor — find it by name, seed it if absent.
+ * Used by /api/sketch/audit to audit sketches before they become systems.
+ */
+export function ensureAuditorAgent() {
+  ensure();
+  const existing = listAgents().find((a) => a.name === AUDITOR_NAME);
+  if (existing) return getAgent(existing.id);
+  return createAgent(AUDITOR_SEED);
 }
 
 /** Seed one example agent on first boot */

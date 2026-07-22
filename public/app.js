@@ -1334,8 +1334,100 @@ function showSketchInModal(sketch) {
     <div class="sketch-row"><div class="ly">S4</div><div>Breakers: $${sketch.s4_guardrails?.breakers?.maxSpendUsd ?? "—"} · ${sketch.s4_guardrails?.breakers?.maxLoops ?? "—"} loops · ${sketch.s4_guardrails?.breakers?.maxTimeSec ?? "—"}s<br/><span class="muted">${esc(sketch.s4_guardrails?.worstCase3am || "")}</span></div></div>
     <div class="sketch-row"><div class="ly">S5</div><div>${(sketch.s5_instruments?.evals || []).length} eval(s) · traces ${sketch.s5_instruments?.traces ? "on" : "off"}</div></div>
     <div class="sketch-row"><div class="ly">S6</div><div>Token budget ${sketch.s6_power?.tokenBudget ?? "—"} · ${sketch.s6_power?.turnLimit ?? "—"} turns</div></div>
-    <div class="sketch-row"><div class="ly">S7</div><div>Checkpoints · versioned · idempotent retries</div></div>`;
+    <div class="sketch-row"><div class="ly">S7</div><div>Checkpoints · versioned · idempotent retries</div></div>
+    ${sketchQualityRows(sketch)}`;
   $("#sketchModal").classList.add("open");
+}
+
+function sketchQualityRows(sketch) {
+  const meta = sketch._sketch || {};
+  const rows = [];
+
+  const reqs = meta.requirements || [];
+  if (reqs.length) {
+    const coverage = meta.critique?.requirementCoverage || [];
+    const items = reqs
+      .map((r, i) => {
+        const cov = coverage.find((c) => c.requirement === r) || coverage[i];
+        const ok = cov ? cov.covered !== false : true;
+        return `<div>${ok ? "✓" : "✗"} ${esc(r)}</div>`;
+      })
+      .join("");
+    rows.push(
+      `<div class="sketch-row"><div class="ly">Reqs</div><div>${items}</div></div>`
+    );
+  }
+
+  if ((meta.ambiguities || []).length) {
+    rows.push(
+      `<div class="sketch-row"><div class="ly">Ambig</div><div class="muted">${meta.ambiguities
+        .map((a) => esc(a))
+        .join("<br/>")}</div></div>`
+    );
+  }
+
+  const issues = [
+    ...(meta.critique?.issues || []).map((i) => `[${i.severity}] ${i.message}`),
+    ...(meta.lint || []).map((f) => `[lint:${f.severity}] ${f.message}`),
+  ];
+  if (issues.length) {
+    rows.push(
+      `<div class="sketch-row"><div class="ly">Issues</div><div class="muted">${issues
+        .map((i) => esc(i))
+        .join("<br/>")}</div></div>`
+    );
+  }
+
+  const notes = [];
+  if ((meta.autoAddedTools || []).length)
+    notes.push(`Auto-added tools the steps need: ${meta.autoAddedTools.join(", ")}`);
+  if (meta.repairRounds) notes.push(`Design repaired ${meta.repairRounds}× in review`);
+  if (notes.length) {
+    rows.push(
+      `<div class="sketch-row"><div class="ly">Review</div><div class="muted">${notes
+        .map((n) => esc(n))
+        .join("<br/>")}</div></div>`
+    );
+  }
+
+  return rows.join("");
+}
+
+async function auditSketch() {
+  const sketch = state.sketch;
+  if (!sketch) return;
+  const modelRef = sketch.modelRef || selectedSketchModel();
+  if (!modelRef) {
+    toast("Select a ready model first", "err");
+    return;
+  }
+  const btn = $("#sketchAudit");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Auditing…";
+  // placeholder row so the user sees the audit is running
+  let row = $("#sketchAuditRow");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "sketch-row";
+    row.id = "sketchAuditRow";
+    $("#sketchGrid").appendChild(row);
+  }
+  row.innerHTML = `<div class="ly">Audit</div><div class="muted">Unified Compliance Auditor running on ${esc(modelRef)}…</div>`;
+  try {
+    const result = await api("/api/sketch/audit", {
+      method: "POST",
+      body: JSON.stringify({ sketch, modelRef }),
+    });
+    row.innerHTML = `<div class="ly">Audit</div><div><span class="muted">status: ${esc(result.status || "?")}</span><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;margin:6px 0 0;font-size:11px">${esc(result.output || "(no output)")}</pre></div>`;
+    toast("Sketch audited — read the verdict before creating");
+  } catch (err) {
+    row.innerHTML = `<div class="ly">Audit</div><div class="muted">Audit failed: ${esc(err.message)}</div>`;
+    toast(err.message, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev || "Audit sketch";
+  }
 }
 
 async function sketchWithSelectedModel() {
@@ -1413,6 +1505,7 @@ async function boot() {
     toast("Pick a Pi model, type intent, then Sketch with model");
   });
   $("#sketchCancel").addEventListener("click", () => $("#sketchModal").classList.remove("open"));
+  $("#sketchAudit")?.addEventListener("click", () => auditSketch());
   $("#sketchCreate").addEventListener("click", () =>
     createFromSketch().catch((e) => toast(e.message, "err"))
   );
