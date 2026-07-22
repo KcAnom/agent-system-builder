@@ -97,10 +97,102 @@ async function reason(agent, state, userMessage, options) {
   const modelRef = options.modelRef;
 
   if (modelRef && modelRef !== "simulator") {
-    return piReason(agent, state, tools, modelRef);
+    return piReason(agent, state, tools, modelRef, userMessage);
   }
 
   return simulateReason(agent, state, userMessage, tools, pattern);
+}
+
+/**
+ * S1 made real: the configured pattern drives each turn of a live model run.
+ * Chain steps are fed turn-by-turn, the routed lane's prompt is pinned, the
+ * orchestrator/worker contract is stated, and the evaluator loop is announced.
+ */
+function patternDirective(agent, state) {
+  const s1 = agent.s1_orchestration || {};
+  const p = s1.pattern;
+  if (p === "prompt_chaining") {
+    const steps = s1.chainSteps || [];
+    if (!steps.length) return null;
+    const idx = Math.min(state.turn - 1, steps.length - 1);
+    const step = steps[idx];
+    const isFinal = state.turn >= steps.length;
+    return `CHAIN STEP ${idx + 1}/${steps.length} — "${step.name}": ${step.prompt || "execute this step"}.${
+      isFinal
+        ? " This is the final step: deliver the finished result in \"content\" and set done=true."
+        : " Complete ONLY this step this turn. Do not set done=true yet."
+    }`;
+  }
+  if (p === "routing" && state.route) {
+    return `ROUTED LANE "${state.route.name}": ${state.route.prompt || "handle the request in this lane"}. Stay in this lane.`;
+  }
+  if (p === "orchestrator_workers") {
+    return `You are the orchestrator. Invent the needed subtasks, then complete them one per turn acting as the worker. Worker contract: ${
+      s1.workerPrompt || "Complete the assigned subtask. Return a clean, structured result only."
+    }`;
+  }
+  if (p === "evaluator_optimizer") {
+    return `Generator/judge loop: produce your best output. A separate judge call will grade it against: "${
+      s1.judgeCriteria || "goal met, claims supported"
+    }". Set done=true only when you believe it passes.`;
+  }
+  return null;
+}
+
+/** Real routing: a classify call picks the lane before any work happens. */
+async function classifyRoute(agent, state, primaryRef, userMessage) {
+  const routes = agent.s1_orchestration?.routes || [];
+  const ref = refForStep(agent, "classify", primaryRef);
+  const timeoutMs = (agent.s7_chassis?.timeoutsSec || 60) * 1000;
+  const laneList = routes
+    .map((r) => `- "${r.name}"${r.match && r.match !== "default" ? ` (typical signals: ${r.match})` : " (default lane)"}: ${r.prompt || ""}`)
+    .join("\n");
+  const { text, tokens, costUsd } = await completeMessages({
+    ref,
+    system: `You are a router. Classify the user request into exactly one lane.\nLanes:\n${laneList}\nRespond with ONLY JSON: {"route":"<lane name>"}`,
+    messages: [{ role: "user", content: userMessage }],
+    timeoutMs,
+  });
+  let picked;
+  try {
+    const name = String(extractJson(text).route || "").toLowerCase();
+    picked = routes.find((r) => (r.name || "").toLowerCase() === name);
+  } catch {
+    /* fall through to default */
+  }
+  picked = picked || routes.find((r) => r.match === "default") || routes[0];
+  state.route = picked;
+  return {
+    thought: `Router (${ref}): classified request into lane "${picked.name}".`,
+    stepType: "classify",
+    content: `Routed to: ${picked.name}`,
+    toolCalls: [],
+    done: false,
+    tokens,
+    costUsd,
+    modelRef: ref,
+    route: picked.name,
+  };
+}
+
+/** Real judge pass for evaluator_optimizer — grades the candidate before done is accepted. */
+async function judgePass(agent, candidate, primaryRef) {
+  const ref = refForStep(agent, "judge", primaryRef);
+  const timeoutMs = (agent.s7_chassis?.timeoutsSec || 60) * 1000;
+  const { text, tokens, costUsd } = await completeMessages({
+    ref,
+    system: `You are a strict judge. Criteria: "${agent.s1_orchestration?.judgeCriteria || "goal met, claims supported"}".\nRespond with ONLY JSON: {"pass": true|false, "feedback": "what to fix if failing"}`,
+    messages: [{ role: "user", content: `Candidate output to judge:\n\n${candidate}` }],
+    timeoutMs,
+  });
+  let verdict = { pass: true, feedback: "" };
+  try {
+    const parsed = extractJson(text);
+    verdict = { pass: !!parsed.pass, feedback: parsed.feedback || "" };
+  } catch {
+    /* unparseable judge reply counts as pass — don't loop forever on a chatty judge */
+  }
+  return { ...verdict, tokens, costUsd, modelRef: ref };
 }
 
 function extractJson(text) {
@@ -114,7 +206,16 @@ function extractJson(text) {
   return JSON.parse(s);
 }
 
-async function piReason(agent, state, tools, primaryRef) {
+async function piReason(agent, state, tools, primaryRef, userMessage) {
+  // Routing pattern: first turn is a real classify call, not free-running
+  if (
+    agent.s1_orchestration?.pattern === "routing" &&
+    !state.route &&
+    (agent.s1_orchestration?.routes || []).length
+  ) {
+    return classifyRoute(agent, state, primaryRef, userMessage);
+  }
+
   const toolLines = tools
     .map((t) => {
       const params = JSON.stringify(t.parameters || { type: "object", properties: {} });
@@ -129,6 +230,7 @@ async function piReason(agent, state, tools, primaryRef) {
     `Goal: ${agent.core?.goal}`,
     `Exit condition: ${agent.core?.exitCondition}`,
     `Orchestration pattern: ${agent.s1_orchestration?.pattern}`,
+    patternDirective(agent, state),
     `Turn ${state.turn} of at most ${agent.s6_power?.turnLimit || 12}.`,
     mem.length ? `Memory notes: ${JSON.stringify(mem)}` : null,
     tools.length ? `Available tools:\n${toolLines}` : "No tools available.",
@@ -545,6 +647,7 @@ function saveCheckpoint(runId, state) {
         messages: state.messages,
         trace: state.trace,
         status: state.status,
+        route: state.route,
         savedAt: new Date().toISOString(),
       },
       null,
@@ -610,6 +713,7 @@ export async function runAgent(agent, userMessage, options = {}) {
     trace: [],
     status: "running",
     checkpointId: null,
+    route: null,
   };
 
   // Resume from chassis checkpoint
@@ -623,6 +727,7 @@ export async function runAgent(agent, userMessage, options = {}) {
         messages: cp.messages || [],
         trace: cp.trace || [],
         status: "running",
+        route: cp.route || null,
       });
       pushEvent(state, opts, {
         type: "resume",
@@ -701,21 +806,42 @@ export async function runAgent(agent, userMessage, options = {}) {
 
     state.turn += 1;
     let decision;
-    try {
-      decision = await reason(agent, state, userMessage, opts);
-    } catch (err) {
-      pushEvent(state, opts, {
-        type: "model_error",
-        turn: state.turn,
-        modelRef,
-        error: err.message,
-        at: new Date().toISOString(),
-      });
-      state.status = "error";
-      stopReason = "model_error";
-      finalOutput = `Model failed (${modelRef}): ${err.message}`;
-      break;
+    let attempt = 0;
+    const maxRetries = agent.s7_chassis?.idempotentRetries
+      ? agent.s7_chassis?.maxRetries ?? 2
+      : 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        decision = await reason(agent, state, userMessage, opts);
+        break;
+      } catch (err) {
+        if (attempt < maxRetries) {
+          attempt += 1;
+          pushEvent(state, opts, {
+            type: "retry",
+            turn: state.turn,
+            attempt,
+            maxRetries,
+            error: err.message,
+            at: new Date().toISOString(),
+          });
+          continue;
+        }
+        pushEvent(state, opts, {
+          type: "model_error",
+          turn: state.turn,
+          modelRef,
+          error: err.message,
+          at: new Date().toISOString(),
+        });
+        state.status = "error";
+        stopReason = "model_error";
+        finalOutput = `Model failed (${modelRef}): ${err.message}`;
+        break;
+      }
     }
+    if (state.status === "error") break;
 
     const tokens = decision.tokens || estimateTokens(decision.content + decision.thought);
     state.tokensUsed += tokens;
@@ -757,6 +883,49 @@ export async function runAgent(agent, userMessage, options = {}) {
     }
     if (toolResults.length) {
       state.messages.push({ role: "user", content: toolResults.join("\n") });
+    }
+
+    // Evaluator pattern: a real judge grades the candidate before done is accepted
+    if (
+      decision.done &&
+      modelRef !== "simulator" &&
+      agent.s1_orchestration?.pattern === "evaluator_optimizer" &&
+      state.turn < maxLoops
+    ) {
+      let verdict;
+      try {
+        verdict = await judgePass(agent, decision.content, modelRef);
+      } catch (err) {
+        pushEvent(state, opts, {
+          type: "model_error",
+          turn: state.turn,
+          modelRef,
+          error: `Judge call failed: ${err.message}`,
+          at: new Date().toISOString(),
+        });
+        state.status = "error";
+        stopReason = "model_error";
+        finalOutput = `Judge failed (${modelRef}): ${err.message}`;
+        break;
+      }
+      state.tokensUsed += verdict.tokens || 0;
+      state.costUsd += verdict.costUsd || 0;
+      pushEvent(state, opts, {
+        type: "judge",
+        turn: state.turn,
+        modelRef: verdict.modelRef,
+        pass: verdict.pass,
+        feedback: verdict.feedback,
+        tokens: verdict.tokens,
+        at: new Date().toISOString(),
+      });
+      if (!verdict.pass) {
+        decision.done = false;
+        state.messages.push({
+          role: "user",
+          content: `JUDGE VERDICT: FAIL — ${verdict.feedback || "criteria not met"}. Revise your output and try again.`,
+        });
+      }
     }
 
     if (decision.done) {

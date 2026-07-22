@@ -164,7 +164,16 @@
               External notes — the pump between working memory and long-term memory.
             </div>
             <div id="memoryList" class="muted">No notes yet.</div>
-            <button class="btn btn-sm" id="btnRefreshMem" style="margin-top:8px">Reload memory</button>
+            <div class="mem-add">
+              <input id="memKey" placeholder="key" class="mono" />
+              <input id="memValue" placeholder="value" />
+              <input id="memTags" placeholder="tags, comma separated" class="mono" />
+              <button class="btn btn-sm btn-good" id="btnAddNote">+ Note</button>
+            </div>
+            <div style="display:flex;gap:6px;margin-top:8px">
+              <button class="btn btn-sm" id="btnRefreshMem">Reload</button>
+              <button class="btn btn-sm btn-crit" id="btnClearMem">Clear all</button>
+            </div>
           </div>
 
           <div class="op-body" id="op-history">

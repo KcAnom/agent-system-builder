@@ -165,10 +165,22 @@ app.get("/api/agents/:id/export", (req, res) => {
 app.post("/api/agents/import", (req, res) => {
   const body = req.body || {};
   const raw = body.agent || body;
+  if (
+    !raw ||
+    typeof raw !== "object" ||
+    Array.isArray(raw) ||
+    typeof raw.name !== "string" ||
+    !raw.core ||
+    typeof raw.core !== "object"
+  ) {
+    return res.status(400).json({
+      error: "Not a valid agent bundle — expected an object with at least name (string) and core (object).",
+    });
+  }
   const agent = createAgent({
     ...raw,
     id: undefined,
-    name: raw.name ? `${raw.name}` : "Imported Agent",
+    name: raw.name,
   });
   res.status(201).json({ agent, score: scoreAgent(agent) });
 });

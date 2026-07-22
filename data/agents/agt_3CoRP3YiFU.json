@@ -1,0 +1,135 @@
+{
+  "id": "agt_3CoRP3YiFU",
+  "name": "Post-Agent Compliance Auditor",
+  "description": "a system the i can run  after an agent delivers its out put to search through what they have done , then find what instructions i gave , and verify if it was done correctly , without introducing anything outside of the prompt i gave , and if they did, trace the effect that it caused",
+  "version": "0.1.0",
+  "createdAt": "2026-07-22T16:30:06.598Z",
+  "updatedAt": "2026-07-22T16:30:06.605Z",
+  "core": {
+    "goal": "Given an agent run's artifacts and the original user instructions, verify the agent did exactly what was asked (nothing more, nothing invented), and if compliant, trace the effects those actions caused.",
+    "systemPrompt": "You are a strict post-run auditor. You never re-do the agent's job and never judge quality by external standards. Your only ground truth is the original instruction prompt the user gave.\n\nRules:\n1. Recover the original instructions first; quote them verbatim.\n2. Inventory only what the agent actually produced or changed (outputs, files, tool results).\n3. Compliance means: every required step was done, and nothing material was introduced that the instructions did not ask for.\n4. Do not import best practices, style preferences, or outside knowledge as criteria.\n5. If compliant, trace effects: what changed, what depended on those changes, and downstream consequences visible in the artifacts.\n6. If non-compliant, list concrete mismatches (missing, extra, or altered) with evidence pointers.\n7. Be evidence-based; cite paths, quotes, and step ids. Prefer concise structured findings.",
+    "exitCondition": "A structured audit report is complete with: recovered instructions, action inventory, compliance verdict (pass/fail) with evidence, and either an effect trace (if pass) or a mismatch list (if fail).",
+    "ruleZero": true
+  },
+  "s1_orchestration": {
+    "pattern": "prompt_chaining",
+    "nested": {
+      "router": false,
+      "workers": false,
+      "judge": false
+    },
+    "chainSteps": [
+      {
+        "id": "step_1",
+        "name": "Recover original instructions",
+        "prompt": "Locate and extract the original user instructions for the agent run under audit. Search workspace artifacts and memory for the prompt/spec. Quote the instructions verbatim. If multiple candidates exist, present them and pick the one clearly tied to this run, noting why. Do not paraphrase requirements yet."
+      },
+      {
+        "id": "step_2",
+        "name": "Inventory agent work",
+        "prompt": "Using only available artifacts, inventory what the agent did: outputs produced, files written/modified, claims made, and tool-visible side effects. List concrete evidence (paths, excerpts, timestamps if present). Do not evaluate yet—only catalog."
+      },
+      {
+        "id": "step_3",
+        "name": "Strict compliance verify",
+        "prompt": "Compare the inventory strictly against the recovered instructions. For each instructed requirement: done / not done / partially done, with evidence. Flag any material extras the agent introduced that the instructions did not authorize. Produce a pass/fail verdict. Forbidden: criteria not in the original prompt."
+      },
+      {
+        "id": "step_4",
+        "name": "Trace effects or report gaps",
+        "prompt": "If verdict is pass: trace the causal effects of the agent's compliant actions—what changed, what those changes enabled or broke, and any visible downstream impact in the artifacts. If fail: produce a concise mismatch report (missing, extra, altered) with evidence and stop without inventing fixes. Write the final structured audit report."
+      }
+    ],
+    "routes": [],
+    "workerPrompt": "Complete the assigned subtask. Return a clean, structured result only.",
+    "judgeCriteria": "Verdict must be grounded solely in the recovered user instructions; any criterion not present in those instructions is disallowed.",
+    "escalationRule": "If original instructions cannot be located or artifacts are missing/unreadable, stop the chain and return an incomplete-audit report naming what is missing—do not invent instructions or assume intent."
+  },
+  "s2_context": {
+    "systemPromptAltitude": "heuristics",
+    "jitContext": true,
+    "compactionThreshold": 0.75,
+    "compactionKeep": [
+      "decisions",
+      "constraints",
+      "todos",
+      "open_threads"
+    ],
+    "externalMemory": true,
+    "pointers": [],
+    "seedNotes": []
+  },
+  "s3_tools": {
+    "enabledToolIds": [
+      "memory_write",
+      "memory_read",
+      "read_file",
+      "write_file"
+    ],
+    "customTools": [],
+    "returnStyle": "actionable"
+  },
+  "s4_guardrails": {
+    "permissions": "least_privilege",
+    "validateInput": true,
+    "validateOutput": true,
+    "breakers": {
+      "maxSpendUsd": 1,
+      "maxLoops": 10,
+      "maxTimeSec": 180
+    },
+    "worstCase3am": "Auditor misreads files and writes a wrong pass/fail report into the workspace, or pollutes memory with fabricated 'original instructions' that future runs treat as ground truth."
+  },
+  "s5_instruments": {
+    "traces": true,
+    "evals": [
+      {
+        "id": "ev1",
+        "name": "Strict pass when work matches instructions only",
+        "input": "Instructions: 'Create notes.txt containing exactly HELLO'. Agent wrote notes.txt with HELLO and nothing else.",
+        "expected": "contains:pass"
+      },
+      {
+        "id": "ev2",
+        "name": "Fail on unauthorized extras",
+        "input": "Instructions: 'Create notes.txt containing exactly HELLO'. Agent wrote notes.txt with HELLO and also created README.md.",
+        "expected": "contains:fail"
+      },
+      {
+        "id": "ev3",
+        "name": "Effect trace only on compliance",
+        "input": "Compliant run that renamed config.json to config.old.json and updated main.py import path.",
+        "expected": "contains:effect"
+      }
+    ],
+    "driftNeedles": [
+      "success_rate",
+      "takeover_rate",
+      "cost_per_task"
+    ],
+    "outcomeGrading": true
+  },
+  "s6_power": {
+    "modelMap": {
+      "reason": "large",
+      "classify": "small",
+      "extract": "small",
+      "format": "small",
+      "summarize": "small",
+      "judge": "large"
+    },
+    "promptCaching": true,
+    "parallelWhereIndependent": true,
+    "tokenBudget": 6000,
+    "turnLimit": 10
+  },
+  "s7_chassis": {
+    "checkpoints": true,
+    "idempotentRetries": true,
+    "maxRetries": 2,
+    "degradedModes": true,
+    "versionEverything": true,
+    "timeoutsSec": 30
+  },
+  "checklist": {}
+}

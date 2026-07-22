@@ -116,6 +116,20 @@ function scoreClass(n) {
   return "low";
 }
 
+/** Options for any model <select>: simulator + every ready Pi model. */
+function modelOptionsHtml(selectedRef, { simulatorLabel = "Simulator (no cost)", blankLabel = null } = {}) {
+  const ready = state.piModels.filter((m) => m.ready);
+  const blank = blankLabel ? `<option value="" ${!selectedRef ? "selected" : ""}>${esc(blankLabel)}</option>` : "";
+  const sim = `<option value="simulator" ${selectedRef === "simulator" ? "selected" : ""}>${esc(simulatorLabel)}</option>`;
+  const opts = ready
+    .map(
+      (m) =>
+        `<option value="${escAttr(m.ref)}" ${selectedRef === m.ref ? "selected" : ""}>${esc(m.providerName)} · ${esc(m.modelName)}</option>`
+    )
+    .join("");
+  return blank + sim + opts;
+}
+
 /** Single place dirty state changes — keeps the Save button honest. */
 function setDirty(v) {
   state.dirty = v;
@@ -156,7 +170,7 @@ function renderFleet() {
       const active = state.agent?.id === a.id ? "active" : "";
       return `
       <button type="button" class="fleet-item ${active}" data-id="${a.id}">
-        <h3>${esc(a.name)}</h3>
+        <h3>${esc(a.name)} <span class="fleet-dup" data-dup="${a.id}" title="Duplicate">⧉</span></h3>
         <p>${esc(a.description || "No description")}</p>
         <div class="fleet-meta">
           <span class="tag">${esc(a.pattern || "—")}</span>
@@ -168,6 +182,15 @@ function renderFleet() {
     .join("");
   $$(".fleet-item", el).forEach((btn) => {
     btn.addEventListener("click", () => openAgent(btn.dataset.id));
+  });
+  $$(".fleet-dup", el).forEach((d) => {
+    d.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const data = await api(`/api/agents/${d.dataset.dup}/duplicate`, { method: "POST", body: "{}" });
+      await loadFleet();
+      await openAgent(data.agent.id);
+      toast("Duplicated");
+    });
   });
 }
 
@@ -351,25 +374,71 @@ function formS1(a) {
     </button>`
     )
     .join("");
-  const steps = (a.s1_orchestration?.chainSteps || [])
-    .map(
-      (s, i) => `
-    <div class="step-row" data-i="${i}">
-      <div class="idx">${i + 1}</div>
-      <input data-k="name" value="${escAttr(s.name)}" placeholder="Name" />
-      <input data-k="prompt" value="${escAttr(s.prompt)}" placeholder="Instruction" />
-      <button type="button" class="btn btn-sm btn-ghost btn-rm-step">✕</button>
-    </div>`
-    )
-    .join("");
+
+  // Pattern-specific editor: only show the controls the selected pattern uses
+  let patternEditor = "";
+  if (current === "prompt_chaining" || current === "parallelization") {
+    const steps = (a.s1_orchestration?.chainSteps || [])
+      .map(
+        (s, i) => `
+      <div class="step-row" data-i="${i}">
+        <div class="idx">${i + 1}</div>
+        <input data-k="name" value="${escAttr(s.name)}" placeholder="Name" />
+        <input data-k="prompt" value="${escAttr(s.prompt)}" placeholder="Instruction" />
+        <button type="button" class="btn btn-sm btn-ghost btn-rm-step">✕</button>
+      </div>`
+      )
+      .join("");
+    patternEditor = `
+    <div class="card">
+      <div class="card-head"><h3>Chain steps</h3><button class="btn btn-sm" id="btnAddStep" type="button">+ Step</button></div>
+      <div class="step-list" id="chainSteps">${steps || '<div class="muted">No steps — add the sequence the run should follow.</div>'}</div>
+      <span class="hint">Live runs feed step N's instruction on turn N.</span>
+    </div>`;
+  } else if (current === "routing") {
+    const routes = (a.s1_orchestration?.routes || [])
+      .map(
+        (r, i) => `
+      <div class="route-row" data-i="${i}">
+        <input data-k="name" value="${escAttr(r.name || "")}" placeholder="Lane name" />
+        <input data-k="match" class="mono" value="${escAttr(r.match || "")}" placeholder="signals regex or 'default'" />
+        <input data-k="prompt" value="${escAttr(r.prompt || "")}" placeholder="Lane instruction" />
+        <button type="button" class="btn btn-sm btn-ghost btn-rm-route">✕</button>
+      </div>`
+      )
+      .join("");
+    patternEditor = `
+    <div class="card">
+      <div class="card-head"><h3>Routes</h3><button class="btn btn-sm" id="btnAddRoute" type="button">+ Route</button></div>
+      <div class="step-list" id="routeList">${routes || '<div class="muted">No lanes yet. Add one per request category.</div>'}</div>
+      <span class="hint">Live runs classify with a real model call, then pin the winning lane's instruction.</span>
+    </div>`;
+  } else if (current === "orchestrator_workers") {
+    patternEditor = `
+    <div class="card">
+      <h3>Worker contract</h3>
+      <div class="field"><textarea id="f-worker" rows="3">${esc(a.s1_orchestration?.workerPrompt || "")}</textarea>
+      <span class="hint">Injected into every live turn as the worker's contract.</span></div>
+    </div>`;
+  } else if (current === "evaluator_optimizer") {
+    patternEditor = `
+    <div class="card">
+      <h3>Judge criteria</h3>
+      <div class="field"><textarea id="f-judge" rows="3">${esc(a.s1_orchestration?.judgeCriteria || "")}</textarea>
+      <span class="hint">Live runs make a real judge call against these criteria before "done" is accepted. A FAIL verdict bounces the output back with feedback.</span></div>
+    </div>`;
+  }
+
+  const judgeField =
+    current === "evaluator_optimizer"
+      ? ""
+      : `<div class="field" style="margin-top:10px"><label>Judge criteria (nested judge)</label><textarea id="f-judge" rows="2">${esc(a.s1_orchestration?.judgeCriteria || "")}</textarea></div>`;
+
   return `
   <div class="card"><h3>Pattern</h3><div class="pattern-list" id="patternList">${patterns}</div></div>
-  <div class="card">
-    <div class="card-head"><h3>Chain steps</h3><button class="btn btn-sm" id="btnAddStep" type="button">+ Step</button></div>
-    <div class="step-list" id="chainSteps">${steps}</div>
-  </div>
+  ${patternEditor}
   <div class="field"><label>Escalation rule</label><textarea id="f-escalation" rows="2">${esc(a.s1_orchestration?.escalationRule || "")}</textarea></div>
-  <div class="field" style="margin-top:10px"><label>Judge criteria</label><textarea id="f-judge" rows="2">${esc(a.s1_orchestration?.judgeCriteria || "")}</textarea></div>
+  ${judgeField}
   <div class="form-row" style="margin-top:12px">
     <div class="switch-row"><div><span>Nest router</span><small>Front-door classify</small></div>
       <label class="toggle"><input type="checkbox" id="f-nest-router" ${a.s1_orchestration?.nested?.router ? "checked" : ""} /><i></i></label></div>
@@ -489,6 +558,10 @@ function formS5(a) {
         <button class="btn btn-sm btn-good" id="btnRunEvals" type="button">Run suite</button>
       </div>
     </div>
+    <div class="field" style="margin:8px 0"><label>Eval model</label>
+      <select id="evalModel" class="model-select" style="width:100%">${modelOptionsHtml(state.lastEvalModel || "simulator")}</select>
+      <span class="hint">Evals expecting real outputs need a real model — the simulator only proves plumbing.</span>
+    </div>
     <div id="evalList">${rows || '<div class="muted">Add real tasks with known-good outcomes.</div>'}</div>
     <div class="output" id="evalReport" style="margin-top:8px;display:none"></div>
   </div>`;
@@ -500,6 +573,13 @@ function formS6(a) {
   const sel = (id, cur) =>
     `<select id="${id}">${opt(cur, "large")}${opt(cur, "small")}</select>`;
   return `
+  <div class="card"><h3>Run models</h3>
+    <div class="field"><label>Default run model (large tier)</label>
+      <select id="f-run-model" class="model-select" style="width:100%">${modelOptionsHtml(a.s6_power?.runModelRef || "simulator")}</select></div>
+    <div class="field" style="margin-top:8px"><label>Small-tier model (classify · judge · summarize)</label>
+      <select id="f-run-model-small" class="model-select" style="width:100%">${modelOptionsHtml(a.s6_power?.runModelRefSmall || "", { blankLabel: "Same as run model" })}</select>
+      <span class="hint">Steps mapped to "small" below use this cheaper model in live runs.</span></div>
+  </div>
   <div class="card"><h3>Model map</h3>
     <div class="form-row">
       <div class="field"><label>reason</label>${sel("f-m-reason", mm.reason || "large")}</div>
@@ -514,12 +594,6 @@ function formS6(a) {
       <div class="field"><label>format</label>${sel("f-m-format", mm.format || "small")}</div>
     </div>
   </div>
-  <div class="form-row">
-    <div class="switch-row"><div><span>Prompt caching</span></div>
-      <label class="toggle"><input type="checkbox" id="f-cache" ${a.s6_power?.promptCaching !== false ? "checked" : ""} /><i></i></label></div>
-    <div class="switch-row"><div><span>Parallel independents</span></div>
-      <label class="toggle"><input type="checkbox" id="f-parallel" ${a.s6_power?.parallelWhereIndependent !== false ? "checked" : ""} /><i></i></label></div>
-  </div>
   <div class="form-row" style="margin-top:10px">
     <div class="field"><label>Token budget</label><input type="number" id="f-token-budget" value="${a.s6_power?.tokenBudget ?? 8000}" /></div>
     <div class="field"><label>Turn limit</label><input type="number" id="f-turn-limit" value="${a.s6_power?.turnLimit ?? 12}" /></div>
@@ -531,10 +605,8 @@ function formS7(a) {
   <div class="form-grid">
     <div class="switch-row"><div><span>Checkpoints</span><small>Resume, never restart from zero</small></div>
       <label class="toggle"><input type="checkbox" id="f-checkpoints" ${a.s7_chassis?.checkpoints !== false ? "checked" : ""} /><i></i></label></div>
-    <div class="switch-row"><div><span>Idempotent retries</span><small>One flaky call ≠ two refunds</small></div>
+    <div class="switch-row"><div><span>Idempotent retries</span><small>Retry a failed model call before erroring</small></div>
       <label class="toggle"><input type="checkbox" id="f-idempotent" ${a.s7_chassis?.idempotentRetries !== false ? "checked" : ""} /><i></i></label></div>
-    <div class="switch-row"><div><span>Degraded modes</span><small>Narrow, don’t collapse</small></div>
-      <label class="toggle"><input type="checkbox" id="f-degraded" ${a.s7_chassis?.degradedModes !== false ? "checked" : ""} /><i></i></label></div>
     <div class="switch-row"><div><span>Version everything</span><small>Prompts · tools · models</small></div>
       <label class="toggle"><input type="checkbox" id="f-versioned" ${a.s7_chassis?.versionEverything !== false ? "checked" : ""} /><i></i></label></div>
     <div class="form-row">
@@ -598,6 +670,32 @@ function wireInspectorHandlers(layer) {
         const row = inp.closest(".step-row");
         const i = Number(row.dataset.i);
         state.agent.s1_orchestration.chainSteps[i][inp.dataset.k] = inp.value;
+        setDirty(true);
+      });
+    });
+    $("#btnAddRoute")?.addEventListener("click", () => {
+      collectForm();
+      if (!state.agent.s1_orchestration.routes) state.agent.s1_orchestration.routes = [];
+      state.agent.s1_orchestration.routes.push({
+        id: "r_" + Date.now(),
+        name: "Lane",
+        match: "",
+        prompt: "",
+      });
+      renderInspector();
+    });
+    $$(".btn-rm-route").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const row = btn.closest(".route-row");
+        collectForm();
+        state.agent.s1_orchestration.routes.splice(Number(row.dataset.i), 1);
+        renderInspector();
+      });
+    });
+    $$("#routeList .route-row input").forEach((inp) => {
+      inp.addEventListener("change", () => {
+        const i = Number(inp.closest(".route-row").dataset.i);
+        state.agent.s1_orchestration.routes[i][inp.dataset.k] = inp.value;
         setDirty(true);
       });
     });
@@ -694,7 +792,8 @@ function collectForm() {
       a.s1_orchestration = {
         ...a.s1_orchestration,
         escalationRule: val("#f-escalation")?.trim() || "",
-        judgeCriteria: val("#f-judge")?.trim() || "",
+        judgeCriteria: $("#f-judge") ? val("#f-judge")?.trim() || "" : a.s1_orchestration.judgeCriteria,
+        workerPrompt: $("#f-worker") ? val("#f-worker")?.trim() || "" : a.s1_orchestration.workerPrompt,
         nested: {
           router: checked("#f-nest-router"),
           workers: checked("#f-nest-workers"),
@@ -757,8 +856,8 @@ function collectForm() {
           judge: val("#f-m-judge") || "large",
           format: val("#f-m-format") || "small",
         },
-        promptCaching: checked("#f-cache"),
-        parallelWhereIndependent: checked("#f-parallel"),
+        runModelRef: val("#f-run-model") || "simulator",
+        runModelRefSmall: val("#f-run-model-small") || "",
         tokenBudget: Number(val("#f-token-budget")) || 8000,
         turnLimit: Number(val("#f-turn-limit")) || 12,
       };
@@ -770,7 +869,6 @@ function collectForm() {
         ...a.s7_chassis,
         checkpoints: checked("#f-checkpoints"),
         idempotentRetries: checked("#f-idempotent"),
-        degradedModes: checked("#f-degraded"),
         versionEverything: checked("#f-versioned"),
         maxRetries: Number(val("#f-max-retries")) || 2,
         timeoutsSec: Number(val("#f-timeouts")) || 30,
@@ -1009,34 +1107,84 @@ async function loadMemory() {
     const mem = await api(`/api/agents/${state.agent.id}/memory`);
     const el = $("#memoryList");
     if (!mem.notes?.length) {
-      el.innerHTML = `<div class="muted">No notes. Enable memory_write and run.</div>`;
+      el.innerHTML = `<div class="muted">No notes. Add one below, or enable memory_write and run.</div>`;
       return;
     }
     el.innerHTML = mem.notes
       .map(
-        (n) =>
-          `<div class="mem-note"><strong>${esc(n.key)}</strong> <span class="muted">${esc((n.tags || []).join(", "))}</span><br/>${esc(n.value)}</div>`
+        (n) => `
+      <div class="mem-note">
+        <strong>${esc(n.key)}</strong> <span class="muted">${esc((n.tags || []).join(", "))}</span>
+        <button type="button" class="btn btn-sm btn-ghost mem-rm" data-key="${escAttr(n.key)}" title="Delete note">✕</button>
+        <br/>${esc(n.value)}
+      </div>`
       )
       .join("");
+    $$(".mem-rm", el).forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const notes = mem.notes.filter((n) => n.key !== btn.dataset.key);
+        await api(`/api/agents/${state.agent.id}/memory`, {
+          method: "PUT",
+          body: JSON.stringify({ notes }),
+        });
+        loadMemory();
+      });
+    });
   } catch {
     /* ignore */
   }
 }
 
+async function addMemoryNote() {
+  if (!state.agent) return;
+  const key = $("#memKey").value.trim();
+  const value = $("#memValue").value.trim();
+  if (!key || !value) return toast("Key and value required", "err");
+  const tags = ($("#memTags").value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const mem = await api(`/api/agents/${state.agent.id}/memory`);
+  const notes = (mem.notes || []).filter((n) => n.key !== key);
+  notes.push({ key, value, tags, updatedAt: new Date().toISOString() });
+  await api(`/api/agents/${state.agent.id}/memory`, {
+    method: "PUT",
+    body: JSON.stringify({ notes }),
+  });
+  $("#memKey").value = "";
+  $("#memValue").value = "";
+  $("#memTags").value = "";
+  loadMemory();
+  toast("Note saved");
+}
+
+async function clearMemory() {
+  if (!state.agent) return;
+  if (!confirm("Delete all memory notes for this system?")) return;
+  await api(`/api/agents/${state.agent.id}/memory`, { method: "DELETE" });
+  loadMemory();
+  toast("Memory cleared");
+}
+
 async function runEvals() {
   if (state.dirty) await saveAgent();
   const btn = $("#btnRunEvals");
-  if (btn) btn.disabled = true;
+  const modelRef = $("#evalModel")?.value || "simulator";
+  state.lastEvalModel = modelRef;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Running…";
+  }
   try {
     const report = await api(`/api/agents/${state.agent.id}/evals`, {
       method: "POST",
-      body: "{}",
+      body: JSON.stringify({ modelRef }),
     });
     const box = $("#evalReport");
     if (box) {
       box.style.display = "block";
       box.textContent =
-        `${report.passed}/${report.total} passed\n\n` +
+        `${report.passed}/${report.total} passed · model: ${report.modelRef}\n\n` +
         report.results
           .map(
             (r) =>
@@ -1044,11 +1192,14 @@ async function runEvals() {
           )
           .join("\n\n");
     }
-    toast(`${report.passed}/${report.total} evals passed`);
+    toast(`${report.passed}/${report.total} evals passed · ${report.modelRef}`);
   } catch (err) {
     toast(err.message, "err");
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Run suite";
+    }
   }
 }
 
@@ -1267,6 +1418,8 @@ async function boot() {
   $("#btnSave").addEventListener("click", () => saveAgent().catch((e) => toast(e.message, "err")));
   $("#btnRun").addEventListener("click", () => runSystem());
   $("#btnRefreshMem").addEventListener("click", loadMemory);
+  $("#btnAddNote").addEventListener("click", () => addMemoryNote().catch((e) => toast(e.message, "err")));
+  $("#btnClearMem").addEventListener("click", () => clearMemory().catch((e) => toast(e.message, "err")));
   $("#btnExport").addEventListener("click", () => {
     if (state.agent) window.open(`/api/agents/${state.agent.id}/export`, "_blank");
   });
@@ -1317,6 +1470,15 @@ async function boot() {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       $("#btnSketch").click();
     }
+  });
+
+  // Score chip → Ship checklist
+  $("#scoreChip").addEventListener("click", () => {
+    if (!state.agent) return;
+    collectForm();
+    state.activeLayer = "ship";
+    renderCanvas();
+    renderInspector();
   });
 
   // Dirty tracking + Cmd+S save

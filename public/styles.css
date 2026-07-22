@@ -431,9 +431,12 @@ a { color: var(--accent); }
   display: grid; grid-template-columns: 28px 1fr 1.3fr auto; gap: 6px; align-items: center;
 }
 .step-row .idx { font-family: var(--mono); font-size: 11px; color: var(--mute); text-align: center; }
-.step-row input {
+.step-row input, .route-row input {
   background: var(--elev); border: 1px solid var(--line); border-radius: 7px;
   padding: 7px 9px; width: 100%;
+}
+.route-row {
+  display: grid; grid-template-columns: 1fr 1fr 1.4fr auto; gap: 6px; align-items: center;
 }
 
 .check-item {
@@ -570,9 +573,18 @@ a { color: var(--accent); }
 .tev.error .etype { color: var(--crit); }
 
 .mem-note {
-  border-bottom: 1px solid var(--line); padding: 8px 0; font-size: 12px;
+  border-bottom: 1px solid var(--line); padding: 8px 0; font-size: 12px; position: relative;
 }
 .mem-note strong { font-family: var(--mono); font-size: 11px; }
+.mem-note .mem-rm { position: absolute; right: 0; top: 6px; padding: 2px 6px; font-size: 10px; }
+.mem-add { display: grid; gap: 6px; margin-top: 10px; }
+.mem-add input {
+  background: var(--elev); border: 1px solid var(--line); border-radius: 7px;
+  padding: 7px 9px; width: 100%; font-size: 12px;
+}
+.fleet-dup { float: right; color: var(--mute); font-size: 12px; padding: 0 2px; }
+.fleet-dup:hover { color: var(--accent); }
+.score-chip { cursor: pointer; }
 
 /* sketch modal */
 .backdrop {
