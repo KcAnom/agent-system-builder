@@ -36,6 +36,19 @@ function refOf(model) {
   return `${model.provider}/${model.id}`;
 }
 
+/** Providers the user excluded from the studio (Pi itself still has them). */
+const EXCLUDED_PROVIDERS = new Set([
+  "anthropic",
+  "google",
+  "cloudflare-workers-ai",
+  "kimi-coding",
+  "mlx-local",
+]);
+
+function isSelectable(model) {
+  return !EXCLUDED_PROVIDERS.has(model.provider);
+}
+
 /**
  * Models the UI can select — everything Pi reports as available
  * (credentials configured). Does not expose secret values.
@@ -43,6 +56,7 @@ function refOf(model) {
 export async function listSelectableModels() {
   const rt = await getRuntime();
   const models = rt.snapshot.available
+    .filter(isSelectable)
     .map((m) => ({
       ref: refOf(m),
       providerId: m.provider,
@@ -73,6 +87,9 @@ async function findModel(ref) {
   const model = rt.snapshot.available.find((m) => refOf(m) === ref);
   if (!model) {
     throw new Error(`Model "${ref}" is not available in your Pi instance. Check /api/models.`);
+  }
+  if (!isSelectable(model)) {
+    throw new Error(`Provider "${model.provider}" is excluded from Agent System Studio.`);
   }
   return { rt, model };
 }
