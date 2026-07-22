@@ -175,6 +175,16 @@ async function classifyRoute(agent, state, primaryRef, userMessage) {
   };
 }
 
+/** Does this run's goal/exit/message ask for a written file artifact? */
+function expectsWrittenArtifact(agent, userMessage) {
+  const text = [agent.core?.goal, agent.core?.exitCondition, userMessage].join(" ");
+  return (
+    /\b(write|writes|written|save|saves|produce|produces|generate|generates|create|creates)\b[^.]*\b(file|files|report|template|templates|document|doc|artifact)s?\b/i.test(
+      text
+    ) || /\.[a-z][a-z0-9]{1,4}\b/i.test(text)
+  );
+}
+
 /** Real judge pass for evaluator_optimizer — grades the candidate before done is accepted. */
 async function judgePass(agent, candidate, primaryRef) {
   const ref = refForStep(agent, "judge", primaryRef);
@@ -234,6 +244,9 @@ async function piReason(agent, state, tools, primaryRef, userMessage) {
     `Turn ${state.turn} of at most ${agent.s6_power?.turnLimit || 12}.`,
     mem.length ? `Memory notes: ${JSON.stringify(mem)}` : null,
     tools.length ? `Available tools:\n${toolLines}` : "No tools available.",
+    tools.some((t) => t.id === "write_file")
+      ? `ARTIFACT RULE: if the goal requires a file, it must actually be produced with write_file before done=true. Describing a file is not writing it.`
+      : null,
     `Respond with ONLY valid JSON (no markdown fences):`,
     `{"thought":"private reasoning","content":"message to show the user","toolCalls":[{"name":"tool_id","arguments":{}}],"done":false}`,
     `Set "done": true with your final answer in "content" when the exit condition is met. Use toolCalls only when needed.`,
@@ -648,6 +661,7 @@ function saveCheckpoint(runId, state) {
         trace: state.trace,
         status: state.status,
         route: state.route,
+        writeNudged: state.writeNudged,
         savedAt: new Date().toISOString(),
       },
       null,
@@ -714,6 +728,7 @@ export async function runAgent(agent, userMessage, options = {}) {
     status: "running",
     checkpointId: null,
     route: null,
+    writeNudged: false,
   };
 
   // Resume from chassis checkpoint
@@ -728,6 +743,7 @@ export async function runAgent(agent, userMessage, options = {}) {
         trace: cp.trace || [],
         status: "running",
         route: cp.route || null,
+        writeNudged: !!cp.writeNudged,
       });
       pushEvent(state, opts, {
         type: "resume",
@@ -883,6 +899,31 @@ export async function runAgent(agent, userMessage, options = {}) {
     }
     if (toolResults.length) {
       state.messages.push({ role: "user", content: toolResults.join("\n") });
+    }
+
+    // Artifact nudge: done without a written file when the goal demands one — bounce once
+    if (
+      decision.done &&
+      modelRef !== "simulator" &&
+      !state.writeNudged &&
+      state.turn < maxLoops &&
+      toolCatalog(agent).some((t) => t.id === "write_file") &&
+      expectsWrittenArtifact(agent, userMessage) &&
+      !state.trace.some((ev) => ev.type === "tool_result" && ev.name === "write_file" && ev.result?.ok)
+    ) {
+      state.writeNudged = true;
+      decision.done = false;
+      pushEvent(state, opts, {
+        type: "nudge",
+        turn: state.turn,
+        reason: "done declared without any successful write_file — goal expects a written artifact",
+        at: new Date().toISOString(),
+      });
+      state.messages.push({
+        role: "user",
+        content:
+          "You declared done, but no file was written with write_file and the goal expects a written artifact. Write it now with write_file, then set done=true. If no file is truly required, say why and set done=true.",
+      });
     }
 
     // Evaluator pattern: a real judge grades the candidate before done is accepted

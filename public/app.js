@@ -964,6 +964,12 @@ function traceEventHtml(ev) {
     summary = `compaction · dropped ${ev.droppedMessages} messages at ${ev.tokensUsed} tokens`;
   } else if (ev.type === "model_error") {
     summary = `✗ model failed · ${ev.modelRef || ""} · ${ev.error || ""}`;
+  } else if (ev.type === "judge") {
+    summary = `judge · ${ev.pass ? "PASS" : "FAIL"}${ev.feedback ? ` — ${ev.feedback}` : ""}`;
+  } else if (ev.type === "nudge") {
+    summary = `⚠ nudge · ${ev.reason || "artifact missing"}`;
+  } else if (ev.type === "retry") {
+    summary = `retry ${ev.attempt}/${ev.maxRetries} · ${ev.error || ""}`;
   } else if (ev.type === "resume") {
     summary = `resumed from checkpoint · turn ${ev.fromTurn}`;
   }
