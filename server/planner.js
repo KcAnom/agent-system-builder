@@ -6,7 +6,6 @@
 import { completeChat } from "./pi-models.js";
 import { ORCHESTRATION_PATTERNS, DEFAULT_TOOLS, createEmptyAgent } from "./schema.js";
 
-const IRREVERSIBLE = new Set(["send_email", "refund_payment"]);
 const KNOWN_TOOLS = new Set(DEFAULT_TOOLS.map((t) => t.id));
 const KNOWN_PATTERNS = new Set(ORCHESTRATION_PATTERNS.map((p) => p.id));
 
@@ -14,10 +13,7 @@ function catalogForPrompt() {
   const patterns = ORCHESTRATION_PATTERNS.map(
     (p) => `- ${p.id} (freedom ${p.freedom}/5): ${p.description} When: ${p.when}`
   ).join("\n");
-  const tools = DEFAULT_TOOLS.map((t) => {
-    const irrev = t.irreversible ? " [IRREVERSIBLE]" : "";
-    return `- ${t.id}${irrev}: ${t.description}`;
-  }).join("\n");
+  const tools = DEFAULT_TOOLS.map((t) => `- ${t.id}: ${t.description}`).join("\n");
   return { patterns, tools };
 }
 
@@ -30,11 +26,7 @@ RULE ZERO: start with the simplest thing that works. Prefer workflows / prompt_c
 
 CRITICAL — DO NOT INVENT CAPABILITIES:
 - Only enable tools the user's intent clearly needs.
-- Never enable send_email unless they asked to email/notify someone by email.
-- Never enable refund_payment unless they asked about refunds/reimbursements.
 - Default tools if unsure: memory_write, memory_read only.
-- irreversibilityLine must ONLY list irreversible tools that you also enabled.
-- If no irreversible tools are enabled, irreversibilityLine = [] and humanGate = false.
 
 Return ONLY valid JSON (no markdown fences) matching this shape:
 {
@@ -66,8 +58,6 @@ Return ONLY valid JSON (no markdown fences) matching this shape:
   },
   "s4_guardrails": {
     "worstCase3am": "string grounded in enabled tools",
-    "irreversibilityLine": [],
-    "humanGate": false,
     "validateInput": true,
     "validateOutput": true,
     "breakers": { "maxSpendUsd": 1, "maxLoops": 10, "maxTimeSec": 180 }
@@ -151,19 +141,6 @@ export function sanitizeSketch(raw, intent, modelRef) {
   // Pattern must be known
   if (!KNOWN_PATTERNS.has(base.s1_orchestration.pattern)) {
     base.s1_orchestration.pattern = "prompt_chaining";
-  }
-
-  // Gates only for enabled irreversible tools
-  const enabled = new Set(base.s3_tools.enabledToolIds);
-  const line = [...IRREVERSIBLE].filter((id) => enabled.has(id));
-  base.s4_guardrails.irreversibilityLine = line;
-  base.s4_guardrails.humanGate = line.length > 0;
-  if (!line.length) {
-    const wc = base.s4_guardrails.worstCase3am || "";
-    if (/email|refund/i.test(wc)) {
-      base.s4_guardrails.worstCase3am =
-        "No irreversible tools enabled; worst case is wasted spend/loops (breakers).";
-    }
   }
 
   // Evals: at least one

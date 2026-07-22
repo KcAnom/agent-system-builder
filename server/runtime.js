@@ -1,6 +1,6 @@
 /**
  * Agent runtime — executes an agent config with S1–S7 discipline.
- * Uses a deterministic simulator + optional OpenAI-compatible LLM if OPENAI_API_KEY is set.
+ * Runs on a real Pi model (selected per run) or the deterministic simulator.
  * Always produces traces, checkpoints, memory, and breaker enforcement.
  */
 
@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { DEFAULT_TOOLS } from "./schema.js";
+import { completeMessages } from "./pi-models.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(__dirname, "..", "data");
@@ -68,13 +69,6 @@ function toolCatalog(agent) {
   return all.filter((t) => enabled.has(t.id) || enabled.has(t.name));
 }
 
-function isIrreversible(agent, toolId) {
-  const line = agent.s4_guardrails?.irreversibilityLine || [];
-  if (line.includes(toolId)) return true;
-  const tool = DEFAULT_TOOLS.find((t) => t.id === toolId);
-  return !!tool?.irreversible;
-}
-
 function estimateTokens(text) {
   return Math.ceil(String(text || "").length / 4);
 }
@@ -84,29 +78,119 @@ function modelForStep(agent, stepType) {
   return map[stepType] || map.reason || "large";
 }
 
+/** Resolve the Pi model ref for a step tier, honoring the small/large model map. */
+function refForStep(agent, stepType, primaryRef) {
+  const tier = modelForStep(agent, stepType);
+  if (tier === "small" && agent.s6_power?.runModelRefSmall) {
+    return agent.s6_power.runModelRefSmall;
+  }
+  return primaryRef;
+}
+
 /**
- * Simulated reasoning step — produces structured plan / tool calls.
- * If OPENAI_API_KEY + OPENAI_BASE_URL (optional) set, uses real LLM.
+ * Reasoning step — real Pi model when a modelRef is selected, simulator otherwise.
+ * A model failure is a hard error: no silent fallback, the run ends as "error".
  */
-async function reason(agent, state, userMessage) {
+async function reason(agent, state, userMessage, options) {
   const tools = toolCatalog(agent);
   const pattern = agent.s1_orchestration?.pattern || "prompt_chaining";
+  const modelRef = options.modelRef;
 
-  // Real LLM path
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      return await llmReason(agent, state, userMessage, tools);
-    } catch (err) {
-      state.trace.push({
-        type: "llm_fallback",
-        error: err.message,
-        at: new Date().toISOString(),
-      });
-    }
+  if (modelRef && modelRef !== "simulator") {
+    return piReason(agent, state, tools, modelRef);
   }
 
-  // Deterministic simulator — demonstrates the loop for no-code builders
   return simulateReason(agent, state, userMessage, tools, pattern);
+}
+
+function extractJson(text) {
+  let s = String(text || "").trim();
+  if (s.startsWith("```")) {
+    s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  }
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start >= 0 && end > start) s = s.slice(start, end + 1);
+  return JSON.parse(s);
+}
+
+async function piReason(agent, state, tools, primaryRef) {
+  const toolLines = tools
+    .map((t) => {
+      const params = JSON.stringify(t.parameters || { type: "object", properties: {} });
+      return `- ${t.id}: ${t.description || ""} When: ${t.when || ""} When NOT: ${t.whenNot || ""} Args schema: ${params}`;
+    })
+    .join("\n");
+
+  const mem = agent.s2_context?.externalMemory ? readNotes(agent.id).slice(-8) : [];
+
+  const system = [
+    agent.core?.systemPrompt,
+    `Goal: ${agent.core?.goal}`,
+    `Exit condition: ${agent.core?.exitCondition}`,
+    `Orchestration pattern: ${agent.s1_orchestration?.pattern}`,
+    `Turn ${state.turn} of at most ${agent.s6_power?.turnLimit || 12}.`,
+    mem.length ? `Memory notes: ${JSON.stringify(mem)}` : null,
+    tools.length ? `Available tools:\n${toolLines}` : "No tools available.",
+    `Respond with ONLY valid JSON (no markdown fences):`,
+    `{"thought":"private reasoning","content":"message to show the user","toolCalls":[{"name":"tool_id","arguments":{}}],"done":false}`,
+    `Set "done": true with your final answer in "content" when the exit condition is met. Use toolCalls only when needed.`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const ref = refForStep(agent, "reason", primaryRef);
+  const timeoutMs = (agent.s7_chassis?.timeoutsSec || 60) * 1000;
+
+  const { text, tokens, costUsd } = await completeMessages({
+    ref,
+    system,
+    messages: state.messages,
+    timeoutMs,
+  });
+
+  try {
+    const parsed = extractJson(text);
+    return {
+      thought: parsed.thought || "",
+      stepType: "reason",
+      content: parsed.content || "",
+      toolCalls: (parsed.toolCalls || []).map((tc) => ({
+        id: tc.id || "tc_" + nanoid(6),
+        name: tc.name,
+        arguments: tc.arguments || {},
+      })),
+      done: !!parsed.done,
+      tokens: tokens || estimateTokens(text),
+      costUsd,
+      modelRef: ref,
+    };
+  } catch {
+    // Model ignored the protocol — treat freeform text as a final answer
+    return {
+      thought: "freeform response (JSON protocol not followed)",
+      stepType: "reason",
+      content: text,
+      toolCalls: [],
+      done: true,
+      tokens: tokens || estimateTokens(text),
+      costUsd,
+      modelRef: ref,
+    };
+  }
+}
+
+function pickRoute(agent, userMessage) {
+  const routes = agent.s1_orchestration?.routes || [];
+  for (const r of routes) {
+    if (!r.match || r.match === "default") continue;
+    try {
+      if (new RegExp(r.match, "i").test(userMessage)) return r;
+    } catch {
+      /* bad regex in route — skip */
+    }
+  }
+  return routes.find((r) => r.match === "default") || routes[0] || { name: "Default" };
 }
 
 function simulateReason(agent, state, userMessage, tools, pattern) {
@@ -114,7 +198,6 @@ function simulateReason(agent, state, userMessage, tools, pattern) {
   const goal = agent.core?.goal || userMessage;
   const hasMemoryWrite = tools.some((t) => t.id === "memory_write");
   const hasSearch = tools.some((t) => t.id === "web_search");
-  const hasEmail = tools.some((t) => t.id === "send_email");
 
   if (pattern === "prompt_chaining") {
     const steps = agent.s1_orchestration?.chainSteps || [];
@@ -177,12 +260,11 @@ function simulateReason(agent, state, userMessage, tools, pattern) {
 
   if (pattern === "routing") {
     if (turn === 1) {
-      const routes = agent.s1_orchestration?.routes || [];
-      const picked = routes[0] || { name: "Default" };
+      const picked = pickRoute(agent, userMessage);
       return {
         thought: `Router (small model): classify request → lane "${picked.name}".`,
         stepType: "classify",
-        content: `Routed to: ${picked.name}`,
+        content: `Routed to: ${picked.name}${picked.prompt ? ` — ${picked.prompt}` : ""}`,
         toolCalls: [],
         done: false,
         route: picked.name,
@@ -242,68 +324,7 @@ function simulateReason(agent, state, userMessage, tools, pattern) {
   }
 
   // Default progression toward exit
-  if (turn >= 3 || state.pendingApprovals.length > 0) {
-    // Only cross the irreversibility line when the *user message* asks for a side-effect
-    // (do not inspect agent.goal — it often mentions refund/email as things to avoid)
-    const msg = String(userMessage || "");
-    const wantsEmail = /\b(send email|email (them|the customer|me)|notify (them|customer))\b/i.test(msg);
-    const wantsRefund = /\brefund\b/i.test(msg);
-    const hasRefund = tools.some((t) => t.id === "refund_payment");
-
-    if (
-      wantsRefund &&
-      hasRefund &&
-      agent.s4_guardrails?.humanGate &&
-      !state.emailGated &&
-      turn === 3
-    ) {
-      state.emailGated = true;
-      return {
-        thought: "Refund requested — crosses irreversibility line.",
-        stepType: "reason",
-        content:
-          "Draft refund prepared. Human gate required before refund_payment fires.",
-        toolCalls: [
-          {
-            id: "tc_" + nanoid(6),
-            name: "refund_payment",
-            arguments: {
-              orderId: (msg.match(/\d{4,}/) || ["unknown"])[0],
-              amount: 0,
-              reason: "Customer requested refund",
-            },
-          },
-        ],
-        done: false,
-      };
-    }
-
-    if (
-      wantsEmail &&
-      hasEmail &&
-      agent.s4_guardrails?.humanGate &&
-      !state.emailGated &&
-      turn === 3
-    ) {
-      state.emailGated = true;
-      return {
-        thought: "Outbound email requested — hits irreversibility line.",
-        stepType: "reason",
-        content: "Requesting human approval before send_email.",
-        toolCalls: [
-          {
-            id: "tc_" + nanoid(6),
-            name: "send_email",
-            arguments: {
-              to: "user@example.com",
-              subject: `Update: ${String(goal).slice(0, 40)}`,
-              body: "Draft update from agent. Awaiting approval.",
-            },
-          },
-        ],
-        done: false,
-      };
-    }
+  if (turn >= 3) {
     return {
       thought: "Exit condition met.",
       stepType: "summarize",
@@ -343,103 +364,83 @@ function buildFinalAnswer(agent, state, userMessage) {
   ].join("\n");
 }
 
-async function llmReason(agent, state, userMessage, tools) {
-  const base = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const model =
-    modelForStep(agent, "reason") === "small"
-      ? process.env.OPENAI_SMALL_MODEL || "gpt-4o-mini"
-      : process.env.OPENAI_MODEL || "gpt-4o-mini";
+// ── Workspace-scoped file tools (S3) ───────────────────────
+const READ_CHAR_CAP = 200_000;
+const WRITE_CHAR_CAP = 1_000_000;
+const LIST_ENTRY_CAP = 500;
 
-  const toolDefs = tools.map((t) => ({
-    type: "function",
-    function: {
-      name: t.name || t.id,
-      description: `${t.description}\nWhen: ${t.when || ""}\nWhen NOT: ${t.whenNot || ""}`,
-      parameters: t.parameters || { type: "object", properties: {} },
-    },
-  }));
-
-  const mem = agent.s2_context?.externalMemory
-    ? readNotes(agent.id).slice(-8)
-    : [];
-
-  const messages = [
-    {
-      role: "system",
-      content: [
-        agent.core?.systemPrompt,
-        `Goal: ${agent.core?.goal}`,
-        `Exit: ${agent.core?.exitCondition}`,
-        `Orchestration pattern: ${agent.s1_orchestration?.pattern}`,
-        `Memory notes: ${JSON.stringify(mem)}`,
-        `Reply with JSON: {"thought":"","content":"","toolCalls":[{"name":"","arguments":{}}],"done":false}`,
-      ].join("\n\n"),
-    },
-    ...state.messages,
-    { role: "user", content: userMessage },
-  ];
-
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      tools: toolDefs.length ? toolDefs : undefined,
-      temperature: 0.2,
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`LLM error ${res.status}: ${await res.text()}`);
-  }
-  const data = await res.json();
-  const choice = data.choices?.[0]?.message;
-  const usage = data.usage?.total_tokens || estimateTokens(JSON.stringify(messages));
-
-  // native tool calls
-  if (choice?.tool_calls?.length) {
-    return {
-      thought: choice.content || "tool use",
-      stepType: "reason",
-      content: choice.content || "",
-      toolCalls: choice.tool_calls.map((tc) => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: JSON.parse(tc.function.arguments || "{}"),
-      })),
-      done: false,
-      tokens: usage,
-    };
-  }
-
-  // JSON content protocol
-  try {
-    const parsed = JSON.parse(choice?.content || "{}");
-    return {
-      thought: parsed.thought || "",
-      stepType: "reason",
-      content: parsed.content || choice?.content || "",
-      toolCalls: parsed.toolCalls || [],
-      done: !!parsed.done,
-      tokens: usage,
-    };
-  } catch {
-    return {
-      thought: "llm freeform",
-      stepType: "reason",
-      content: choice?.content || "",
-      toolCalls: [],
-      done: true,
-      tokens: usage,
-    };
-  }
+/** Workspace root: agent's configured folder, else a sandboxed default. */
+function workspaceRoot(agent) {
+  const configured = agent.s3_tools?.workspaceDir?.trim();
+  const root = configured
+    ? path.resolve(configured)
+    : path.join(DATA, "workspaces", agent.id || "unassigned");
+  if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });
+  return root;
 }
 
-async function executeTool(agent, state, call, options = {}) {
+/**
+ * Resolve a relative path strictly inside the workspace root.
+ * Rejects traversal ('..'), absolute escapes, and symlink escapes.
+ */
+export function resolveInWorkspace(root, p) {
+  const target = path.resolve(root, String(p ?? ""));
+  const rel = path.relative(root, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Path escapes the workspace: ${p}`);
+  }
+  // Symlink check on the deepest existing ancestor
+  const realRoot = fs.realpathSync(root);
+  let probe = target;
+  while (!fs.existsSync(probe)) probe = path.dirname(probe);
+  const realProbe = fs.realpathSync(probe);
+  if (realProbe !== realRoot && !realProbe.startsWith(realRoot + path.sep)) {
+    throw new Error(`Path escapes the workspace via symlink: ${p}`);
+  }
+  return target;
+}
+
+function readFileTool(agent, args) {
+  const root = workspaceRoot(agent);
+  const target = resolveInWorkspace(root, args.path);
+  if (!fs.existsSync(target)) {
+    return { error: "not_found", hint: `No file or folder at "${args.path}" in workspace ${root}` };
+  }
+  const stat = fs.statSync(target);
+  if (stat.isDirectory()) {
+    const entries = fs.readdirSync(target, { withFileTypes: true }).slice(0, LIST_ENTRY_CAP);
+    return {
+      path: args.path,
+      dir: true,
+      entries: entries.map((e) => ({
+        name: e.name,
+        type: e.isDirectory() ? "dir" : "file",
+      })),
+    };
+  }
+  const content = fs.readFileSync(target, "utf8");
+  const truncated = content.length > READ_CHAR_CAP;
+  return {
+    path: args.path,
+    bytes: stat.size,
+    truncated,
+    content: truncated ? content.slice(0, READ_CHAR_CAP) : content,
+  };
+}
+
+function writeFileTool(agent, args) {
+  const root = workspaceRoot(agent);
+  const content = String(args.content ?? "");
+  if (content.length > WRITE_CHAR_CAP) {
+    return { error: "too_large", hint: `Content exceeds ${WRITE_CHAR_CAP} chars — split the write.` };
+  }
+  const target = resolveInWorkspace(root, args.path);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, content);
+  return { ok: true, path: args.path, bytes: Buffer.byteLength(content), workspace: root };
+}
+
+async function executeTool(agent, state, call) {
   const tools = toolCatalog(agent);
   const tool = tools.find((t) => t.id === call.name || t.name === call.name);
   if (!tool) {
@@ -449,20 +450,14 @@ async function executeTool(agent, state, call, options = {}) {
     };
   }
 
-  // Permissions / irreversibility
-  if (isIrreversible(agent, tool.id) && agent.s4_guardrails?.humanGate) {
-    if (!options.approvals?.includes(call.id) && !options.approvals?.includes(tool.id)) {
-      state.pendingApprovals.push({
-        callId: call.id,
-        tool: tool.id,
-        arguments: call.arguments,
-        reason: "Irreversible action — human gate required (S4).",
-      });
-      return {
-        error: "human_gate_required",
-        hint: `Action ${tool.id} crosses the irreversibility line. Approve in the Run console to continue.`,
-        pending: true,
-      };
+  // Real workspace file tools
+  if (tool.id === "read_file" || tool.id === "write_file") {
+    try {
+      return tool.id === "read_file"
+        ? readFileTool(agent, call.arguments || {})
+        : writeFileTool(agent, call.arguments || {});
+    } catch (err) {
+      return { error: "workspace_error", hint: err.message };
     }
   }
 
@@ -501,6 +496,41 @@ function costFor(modelTier, tokens) {
   return (tokens / 1000) * per1k;
 }
 
+/** Push a trace event and stream it to the client if a listener is attached. */
+function pushEvent(state, options, ev) {
+  state.trace.push(ev);
+  if (typeof options.onEvent === "function") {
+    try {
+      options.onEvent(ev);
+    } catch {
+      /* stream broken — keep running */
+    }
+  }
+  return ev;
+}
+
+/** S2 compaction: trim old messages once past the threshold of the token budget. */
+function compactIfNeeded(agent, state, options) {
+  if (agent.s2_context?.jitContext === false) return;
+  const budget = agent.s6_power?.tokenBudget || 8000;
+  const threshold = agent.s2_context?.compactionThreshold ?? 0.75;
+  if (state.tokensUsed < budget * threshold) return;
+  if (state.messages.length <= 5) return;
+  const dropped = state.messages.splice(0, state.messages.length - 4);
+  const keep = (agent.s2_context?.compactionKeep || []).join(", ");
+  state.messages.unshift({
+    role: "user",
+    content: `[Context compacted: ${dropped.length} earlier messages summarized away. Preserve: ${keep || "decisions, open threads"}.]`,
+  });
+  pushEvent(state, options, {
+    type: "compaction",
+    droppedMessages: dropped.length,
+    tokensUsed: state.tokensUsed,
+    threshold,
+    at: new Date().toISOString(),
+  });
+}
+
 function saveCheckpoint(runId, state) {
   ensureDirs();
   const p = path.join(RUNS_DIR, `${runId}.checkpoint.json`);
@@ -513,7 +543,6 @@ function saveCheckpoint(runId, state) {
         tokensUsed: state.tokensUsed,
         costUsd: state.costUsd,
         messages: state.messages,
-        pendingApprovals: state.pendingApprovals,
         trace: state.trace,
         status: state.status,
         savedAt: new Date().toISOString(),
@@ -562,23 +591,25 @@ export function listRuns(agentId) {
 
 /**
  * Main entry — run agent on a user message.
- * options: { resumeRunId, approvals: string[], maxTurns }
+ * options: { resumeRunId, maxTurns, modelRef, isEval, onEvent }
+ * modelRef: "simulator" or a Pi model ref ("provider/model"). Defaults to the
+ * agent's s6_power.runModelRef, else the simulator.
  */
 export async function runAgent(agent, userMessage, options = {}) {
   ensureDirs();
   const startedAt = new Date().toISOString();
   let runId = options.resumeRunId || `run_${nanoid(10)}`;
+  const modelRef = options.modelRef || agent.s6_power?.runModelRef || "simulator";
+  const opts = { ...options, modelRef };
 
   const state = {
     turn: 0,
     tokensUsed: 0,
     costUsd: 0,
     messages: [],
-    pendingApprovals: [],
     trace: [],
     status: "running",
     checkpointId: null,
-    emailGated: false,
   };
 
   // Resume from chassis checkpoint
@@ -590,11 +621,10 @@ export async function runAgent(agent, userMessage, options = {}) {
         tokensUsed: cp.tokensUsed,
         costUsd: cp.costUsd,
         messages: cp.messages || [],
-        pendingApprovals: [],
         trace: cp.trace || [],
         status: "running",
       });
-      state.trace.push({
+      pushEvent(state, opts, {
         type: "resume",
         fromTurn: cp.turn,
         at: new Date().toISOString(),
@@ -609,6 +639,7 @@ export async function runAgent(agent, userMessage, options = {}) {
   );
   const maxSpend = agent.s4_guardrails?.breakers?.maxSpendUsd ?? 1;
   const maxTimeMs = (agent.s4_guardrails?.breakers?.maxTimeSec || 300) * 1000;
+  const tokenBudget = agent.s6_power?.tokenBudget || 0;
   const t0 = Date.now();
 
   // Input validation (S4 middle ring — light)
@@ -617,29 +648,35 @@ export async function runAgent(agent, userMessage, options = {}) {
       /ignore (all )?(previous|prior) instructions/i.test(userMessage) ||
       /system\s*:\s*/i.test(userMessage);
     if (injection) {
-      state.trace.push({
+      pushEvent(state, opts, {
         type: "guardrail",
         ring: "validation",
         action: "blocked_input",
         reason: "Possible prompt injection in user message",
         at: new Date().toISOString(),
       });
-      const run = finalize(runId, agent, userMessage, state, startedAt, {
+      return finalize(runId, agent, userMessage, state, startedAt, {
         status: "blocked",
         output: "Input blocked by validation guardrail (S4).",
+        modelRef,
+        isEval: options.isEval,
       });
-      return run;
     }
   }
 
-  state.trace.push({
+  pushEvent(state, opts, {
     type: "run_start",
     agentId: agent.id,
     agentVersion: agent.version,
     pattern: agent.s1_orchestration?.pattern,
     goal: agent.core?.goal,
+    modelRef,
     at: startedAt,
   });
+
+  if (!options.resumeRunId || !state.messages.length) {
+    state.messages.push({ role: "user", content: userMessage });
+  }
 
   let finalOutput = "";
   let stopReason = "completed";
@@ -656,19 +693,41 @@ export async function runAgent(agent, userMessage, options = {}) {
       state.status = "breaker";
       break;
     }
+    if (tokenBudget && state.tokensUsed >= tokenBudget) {
+      stopReason = "token_breaker";
+      state.status = "breaker";
+      break;
+    }
 
     state.turn += 1;
-    const decision = await reason(agent, state, userMessage);
+    let decision;
+    try {
+      decision = await reason(agent, state, userMessage, opts);
+    } catch (err) {
+      pushEvent(state, opts, {
+        type: "model_error",
+        turn: state.turn,
+        modelRef,
+        error: err.message,
+        at: new Date().toISOString(),
+      });
+      state.status = "error";
+      stopReason = "model_error";
+      finalOutput = `Model failed (${modelRef}): ${err.message}`;
+      break;
+    }
 
     const tokens = decision.tokens || estimateTokens(decision.content + decision.thought);
     state.tokensUsed += tokens;
-    state.costUsd += costFor(modelForStep(agent, decision.stepType || "reason"), tokens);
+    // Prefer the provider's real cost (Pi usage data); estimate only for the simulator
+    state.costUsd += decision.costUsd || costFor(modelForStep(agent, decision.stepType || "reason"), tokens);
 
-    state.trace.push({
+    pushEvent(state, opts, {
       type: "model_call",
       turn: state.turn,
       stepType: decision.stepType,
       modelTier: modelForStep(agent, decision.stepType || "reason"),
+      modelRef: decision.modelRef || "simulator",
       thought: decision.thought,
       content: decision.content,
       toolCalls: decision.toolCalls || [],
@@ -678,15 +737,14 @@ export async function runAgent(agent, userMessage, options = {}) {
 
     state.messages.push({
       role: "assistant",
-      content: decision.content,
+      content: decision.content || decision.thought || "(no content)",
     });
 
-    // Tool execution
+    // Tool execution — results combined into one user message per turn
+    const toolResults = [];
     for (const call of decision.toolCalls || []) {
-      const result = await executeTool(agent, state, call, {
-        approvals: options.approvals || [],
-      });
-      state.trace.push({
+      const result = await executeTool(agent, state, call);
+      pushEvent(state, opts, {
         type: "tool_result",
         turn: state.turn,
         name: call.name,
@@ -695,20 +753,10 @@ export async function runAgent(agent, userMessage, options = {}) {
         result,
         at: new Date().toISOString(),
       });
-      state.messages.push({
-        role: "tool",
-        content: JSON.stringify(result),
-      });
+      toolResults.push(`Tool result (${call.name}): ${JSON.stringify(result)}`);
     }
-
-    // Human gate pause
-    if (state.pendingApprovals.length) {
-      stopReason = "awaiting_approval";
-      state.status = "awaiting_approval";
-      finalOutput =
-        decision.content +
-        "\n\n⏸ Paused at irreversibility line. Approve pending actions to continue.";
-      break;
+    if (toolResults.length) {
+      state.messages.push({ role: "user", content: toolResults.join("\n") });
     }
 
     if (decision.done) {
@@ -717,6 +765,8 @@ export async function runAgent(agent, userMessage, options = {}) {
       stopReason = "exit_condition";
       break;
     }
+
+    compactIfNeeded(agent, state, opts);
 
     // Chassis checkpoint each turn
     if (agent.s7_chassis?.checkpoints) {
@@ -742,8 +792,8 @@ export async function runAgent(agent, userMessage, options = {}) {
   }
 
   // Output validation stub
-  if (agent.s4_guardrails?.validateOutput && finalOutput) {
-    state.trace.push({
+  if (agent.s4_guardrails?.validateOutput && finalOutput && state.status !== "error") {
+    pushEvent(state, opts, {
       type: "guardrail",
       ring: "validation",
       action: "output_checked",
@@ -760,10 +810,12 @@ export async function runAgent(agent, userMessage, options = {}) {
     status: state.status === "running" ? "completed" : state.status,
     output: finalOutput,
     stopReason,
+    modelRef,
+    isEval: options.isEval,
   });
 }
 
-function finalize(runId, agent, userMessage, state, startedAt, { status, output, stopReason }) {
+function finalize(runId, agent, userMessage, state, startedAt, { status, output, stopReason, modelRef, isEval }) {
   const run = {
     id: runId,
     agentId: agent.id,
@@ -773,16 +825,16 @@ function finalize(runId, agent, userMessage, state, startedAt, { status, output,
     output,
     status,
     stopReason: stopReason || status,
+    modelRef: modelRef || "simulator",
+    isEval: !!isEval,
     turn: state.turn,
     tokensUsed: state.tokensUsed,
     costUsd: Number(state.costUsd.toFixed(6)),
-    pendingApprovals: state.pendingApprovals,
     trace: agent.s5_instruments?.traces === false ? [] : state.trace,
     startedAt,
     finishedAt: new Date().toISOString(),
     needles: {
       success: status === "completed" ? 1 : 0,
-      takeover: status === "awaiting_approval" ? 1 : 0,
       cost_per_task: Number(state.costUsd.toFixed(6)),
     },
   };
@@ -790,12 +842,16 @@ function finalize(runId, agent, userMessage, state, startedAt, { status, output,
   return run;
 }
 
-/** Run eval suite against agent */
-export async function runEvals(agent) {
+/** Run eval suite against agent. modelRef optional — defaults to the simulator. */
+export async function runEvals(agent, { modelRef } = {}) {
   const evals = agent.s5_instruments?.evals || [];
   const results = [];
   for (const ev of evals) {
-    const run = await runAgent(agent, ev.input, { maxTurns: agent.s6_power?.turnLimit || 8 });
+    const run = await runAgent(agent, ev.input, {
+      maxTurns: agent.s6_power?.turnLimit || 8,
+      modelRef: modelRef || "simulator",
+      isEval: true,
+    });
     const passed = scoreEval(ev, run);
     results.push({
       evalId: ev.id,
@@ -813,14 +869,15 @@ export async function runEvals(agent) {
     agentId: agent.id,
     total: results.length,
     passed: results.filter((r) => r.passed).length,
+    modelRef: modelRef || "simulator",
     results,
     at: new Date().toISOString(),
   };
 }
 
 function scoreEval(ev, run) {
-  if (run.status !== "completed" && run.status !== "awaiting_approval") return false;
-  if (!ev.expected) return run.status === "completed";
+  if (run.status !== "completed") return false;
+  if (!ev.expected) return true;
   const out = `${run.output || ""} ${run.stopReason || ""} ${run.status || ""}`.toLowerCase();
   const exp = String(ev.expected).toLowerCase();
   // outcome grading: expected substring or all keywords

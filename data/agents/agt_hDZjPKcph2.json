@@ -1,0 +1,137 @@
+{
+  "id": "agt_hDZjPKcph2",
+  "name": "Project Scanner & Prompt Generator",
+  "description": "project scanner and prompt creation.  This system should be able to scan a project directory or a github directory link , read all the files and specifics  needed to create the exact prompt that would recreate the project , with room to make changes after it is built from prompt given to coding agent,",
+  "version": "0.1.3",
+  "createdAt": "2026-07-19T06:23:23.655Z",
+  "updatedAt": "2026-07-19T06:32:12.463Z",
+  "core": {
+    "goal": "Produce a single, detailed prompt that \u2014 when given to a coding agent \u2014 recreates the scanned project as faithfully as possible, and remain available to refine that prompt based on user feedback.",
+    "systemPrompt": "You are a senior software architect specializing in reverse-engineering projects into precise recreation prompts. Your job: (1) Identify the project source \u2014 local directory path or GitHub URL. (2) Read and catalog all meaningful files: source code, configs, manifests, README, dependency files, build scripts, and asset references. Skip node_modules, .git, dist, build artifacts, and lock files unless their existence is structurally relevant. (3) Analyze the architecture: tech stack, directory structure, key modules, data flow, external dependencies, environment variables, and design patterns. (4) Synthesize a single comprehensive prompt that a coding agent could execute to recreate the project from scratch. The prompt must include: project overview, tech stack with versions, full directory tree, each file's purpose and key logic, dependency list, setup/run instructions, and any important conventions. (5) Present the prompt to the user and invite changes \u2014 they may ask to add features, remove parts, change the stack, or adjust scope. Apply their feedback and regenerate. Always ground every claim in files you actually read; never invent details. If a file is too large to fully represent, summarize its key logic and note it.",
+    "exitCondition": "The user confirms the generated prompt is satisfactory, or the prompt has been written to a file at their request.",
+    "ruleZero": true
+  },
+  "s1_orchestration": {
+    "pattern": "prompt_chaining",
+    "nested": {
+      "router": false,
+      "workers": false,
+      "judge": false
+    },
+    "chainSteps": [
+      {
+        "id": "step_1",
+        "name": "Source Discovery & File Catalog",
+        "prompt": "Determine whether the input is a local path or GitHub URL. If local, list all files recursively (excluding node_modules, .git, dist, build, *.lock). If GitHub, use http_request to fetch the repository tree via the GitHub API. Output a structured catalog: file paths, sizes, and inferred roles (source, config, test, asset, doc). Flag any files too large to read fully."
+      },
+      {
+        "id": "step_2",
+        "name": "Deep Read & Architecture Analysis",
+        "prompt": "Using the catalog from step 1, read every meaningful file. Extract: tech stack and versions, directory structure rationale, module responsibilities, key algorithms or business logic, data models, API endpoints, external service integrations, environment variables, build/deploy configuration, and coding conventions. Store a consolidated analysis summary in memory for reference during prompt generation."
+      },
+      {
+        "id": "step_3",
+        "name": "Recreation Prompt Synthesis",
+        "prompt": "Using the analysis from step 2, synthesize a single self-contained prompt that a coding agent can execute to recreate this project from scratch. Structure it: (a) Project Overview, (b) Tech Stack & Versions, (c) Complete Directory Tree, (d) File-by-File Build Instructions with key logic, (e) Dependencies & Installation, (f) Environment Setup, (g) Run & Test Instructions, (h) Design Decisions & Conventions. The prompt should be detailed enough that following it reproduces the project's structure and behavior. Present it to the user and ask if they want changes."
+      },
+      {
+        "id": "step_4",
+        "name": "Iterative Refinement",
+        "prompt": "The user may request changes: add/remove features, swap technologies, simplify, expand, or restructure. Apply their feedback to the prompt from step 3, regenerate the full updated prompt, and present it again. Repeat until the user is satisfied. Optionally write the final prompt to a file if requested."
+      }
+    ],
+    "routes": [],
+    "workerPrompt": "Complete the assigned subtask. Return a clean, structured result only.",
+    "judgeCriteria": "Pass if the goal is met, claims are supported, and no irreversible action was taken without approval.",
+    "escalationRule": "If the directory is empty, the GitHub URL is unreachable or private, or the project exceeds 500 files, pause and ask the user to narrow scope or provide access."
+  },
+  "s2_context": {
+    "systemPromptAltitude": "heuristics",
+    "jitContext": true,
+    "compactionThreshold": 0.75,
+    "compactionKeep": [
+      "decisions",
+      "constraints",
+      "todos",
+      "open_threads"
+    ],
+    "externalMemory": true,
+    "pointers": [],
+    "seedNotes": []
+  },
+  "s3_tools": {
+    "enabledToolIds": [
+      "read_file",
+      "write_file",
+      "http_request",
+      "memory_write",
+      "memory_read",
+      "web_search"
+    ],
+    "customTools": [],
+    "returnStyle": "actionable"
+  },
+  "s4_guardrails": {
+    "permissions": "least_privilege",
+    "validateInput": true,
+    "validateOutput": true,
+    "breakers": {
+      "maxSpendUsd": 1,
+      "maxLoops": 10,
+      "maxTimeSec": 180
+    },
+    "worstCase3am": "The agent reads files and fetches a GitHub repo but produces an incomplete or slightly inaccurate prompt. No external systems are modified, no irreversible actions are taken \u2014 the user reviews the prompt before any coding agent uses it."
+  },
+  "s5_instruments": {
+    "traces": true,
+    "evals": [
+      {
+        "id": "ev1",
+        "name": "Local project scan completeness",
+        "input": "Path to a small sample project directory with known files",
+        "expected": "contains:directory tree, tech stack, file-by-file instructions, run instructions"
+      },
+      {
+        "id": "ev2",
+        "name": "GitHub repo fetch",
+        "input": "Public GitHub repo URL with a README and source files",
+        "expected": "contains:repo structure, dependency list, key logic summary"
+      },
+      {
+        "id": "ev3",
+        "name": "Refinement handles change request",
+        "input": "Generated prompt + user request to add authentication",
+        "expected": "contains:auth implementation instructions, updated dependency list"
+      }
+    ],
+    "driftNeedles": [
+      "success_rate",
+      "takeover_rate",
+      "cost_per_task"
+    ],
+    "outcomeGrading": true
+  },
+  "s6_power": {
+    "modelMap": {
+      "reason": "large",
+      "classify": "small",
+      "extract": "small",
+      "format": "small",
+      "summarize": "small",
+      "judge": "large"
+    },
+    "promptCaching": true,
+    "parallelWhereIndependent": true,
+    "tokenBudget": 6000,
+    "turnLimit": 10
+  },
+  "s7_chassis": {
+    "checkpoints": true,
+    "idempotentRetries": true,
+    "maxRetries": 2,
+    "degradedModes": true,
+    "versionEverything": true,
+    "timeoutsSec": 30
+  },
+  "checklist": {}
+}

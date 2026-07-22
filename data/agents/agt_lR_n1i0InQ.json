@@ -1,0 +1,142 @@
+{
+  "id": "agt_lR_n1i0InQ",
+  "name": "Orphan Finder",
+  "description": "Scans a codebase for orphaned code, disconnected features, and mock data.",
+  "version": "0.1.4",
+  "createdAt": "2026-07-19T09:34:45.206Z",
+  "updatedAt": "2026-07-22T16:10:21.324Z",
+  "core": {
+    "goal": "Produce a comprehensive, decision-ready report of every orphaned feature, disconnected component, and mock-data usage in the target codebase, including location, severity, and recommended action.",
+    "systemPrompt": "You are a senior code auditor specialized in finding dead code, orphaned features, and mock data. You explore the codebase methodically using read_file. You trace connectivity from entry points, flag anything unreachable or partially wired, and detect mock/stub/placeholder data. For every finding you capture: file path, line range, type (orphan | disconnected | mock_data), description, severity (critical | high | medium | low), and recommended action (remove | integrate | replace_mock | needs_human_review). You never modify source files — you only read and report. Be exhaustive but precise; false positives erode trust.",
+    "exitCondition": "A structured report file has been written listing all identified orphaned features, disconnected code, and mock-data instances with full details for each finding, or the codebase contains zero findings and an empty-report has been written.",
+    "ruleZero": true
+  },
+  "s1_orchestration": {
+    "pattern": "prompt_chaining",
+    "nested": {
+      "router": false,
+      "workers": false,
+      "judge": false
+    },
+    "chainSteps": [
+      {
+        "id": "step_1",
+        "name": "Map Codebase",
+        "prompt": "Explore the target codebase using read_file. Build a complete inventory: list all source files, identify entry points (main, index, app, server files, route definitions), catalog every module/component, and note the import/dependency graph between them. Store the inventory and dependency map to memory via memory_write with tag 'codebase_map'."
+      },
+      {
+        "id": "step_2",
+        "name": "Detect Orphans & Disconnected Features",
+        "prompt": "Using the dependency map from step 1 (retrieve via memory_read), trace reachability from all entry points. Identify: (a) files/components never imported or called from any entry point — orphans; (b) files imported but whose exported functions are never invoked — partially disconnected; (c) routes/endpoints registered but with no UI or caller. For each finding record file path, line range, type, description, and severity. Store findings to memory with tag 'orphan_findings'."
+      },
+      {
+        "id": "step_3",
+        "name": "Detect Mock Data",
+        "prompt": "Scan the codebase for mock data patterns: hardcoded arrays/objects that look like real data, variables named mock/stub/fake/placeholder/sample/demo/todo, commented-out real implementations replaced with static returns, and environment-gated mock blocks. For each finding record file path, line range, description, severity, and whether it appears in a production code path. Store findings to memory with tag 'mock_findings'."
+      },
+      {
+        "id": "step_4",
+        "name": "Compile Report",
+        "prompt": "Retrieve both 'orphan_findings' and 'mock_findings' from memory. Merge them into a single structured report sorted by severity (critical first). For each finding include: id, file_path, line_range, type, description, severity, recommended_action, and notes. Add a summary section with counts by type and severity. Write the final report to the workspace using write_file at path 'orphan_report.md'. Include a 'decision_matrix' section grouping findings by recommended_action so stakeholders can quickly see what to remove, what to fix, and what needs human review."
+      }
+    ],
+    "routes": [],
+    "workerPrompt": "Complete the assigned subtask. Return a clean, structured result only.",
+    "judgeCriteria": "Pass if the goal is met, claims are supported, and no irreversible action was taken without approval.",
+    "escalationRule": "If the codebase exceeds 200 files or a file cannot be read after 2 retries, note it in the report under a 'scan_incomplete' section rather than failing the entire run."
+  },
+  "s2_context": {
+    "systemPromptAltitude": "rules",
+    "jitContext": true,
+    "compactionThreshold": 0.75,
+    "compactionKeep": [
+      "decisions",
+      "constraints",
+      "todos",
+      "open_threads"
+    ],
+    "externalMemory": true,
+    "pointers": [],
+    "seedNotes": []
+  },
+  "s3_tools": {
+    "enabledToolIds": [
+      "read_file",
+      "write_file",
+      "memory_write",
+      "memory_read"
+    ],
+    "customTools": [],
+    "returnStyle": "actionable",
+    "workspaceDir": ""
+  },
+  "s4_guardrails": {
+    "permissions": "least_privilege",
+    "validateInput": true,
+    "validateOutput": true,
+    "breakers": {
+      "maxSpendUsd": 2,
+      "maxLoops": 15,
+      "maxTimeSec": 300
+    },
+    "worstCase3am": "System reads many files and produces an incomplete report missing some orphans. No source files are modified — only a report file is written. Worst case is a false negative (missed orphan) or false positive (flagged reachable code as orphan), both caught by human review of the report."
+  },
+  "s5_instruments": {
+    "traces": true,
+    "evals": [
+      {
+        "id": "ev1",
+        "name": "Detects unreachable file",
+        "input": "Codebase with 3 files: index.js imports app.js; utils.js exists but is never imported by anything.",
+        "expected": "contains:utils.js"
+      },
+      {
+        "id": "ev2",
+        "name": "Detects mock data in production path",
+        "input": "Codebase with a file containing 'const users = [{ id: 1, name: \"Test User\" }];' inside a route handler.",
+        "expected": "contains:mock_data"
+      },
+      {
+        "id": "ev3",
+        "name": "Report includes decision matrix",
+        "input": "Any non-empty codebase with at least one finding.",
+        "expected": "contains:decision_matrix"
+      },
+      {
+        "id": "ev4",
+        "name": "No false modifications",
+        "input": "Run against any codebase.",
+        "expected": "no source files modified outside orphan_report.md"
+      }
+    ],
+    "driftNeedles": [
+      "success_rate",
+      "takeover_rate",
+      "cost_per_task"
+    ],
+    "outcomeGrading": true
+  },
+  "s6_power": {
+    "modelMap": {
+      "reason": "large",
+      "classify": "small",
+      "extract": "small",
+      "format": "small",
+      "summarize": "small",
+      "judge": "large"
+    },
+    "promptCaching": true,
+    "parallelWhereIndependent": true,
+    "tokenBudget": 8000,
+    "turnLimit": 15
+  },
+  "s7_chassis": {
+    "checkpoints": true,
+    "idempotentRetries": true,
+    "maxRetries": 2,
+    "degradedModes": true,
+    "versionEverything": true,
+    "timeoutsSec": 30
+  },
+  "checklist": {}
+}

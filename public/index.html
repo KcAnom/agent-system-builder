@@ -45,7 +45,7 @@
                 <label>What should this system do?</label>
                 <textarea
                   id="intentInput"
-                  placeholder="Triage support: classify refund vs bug, draft reply, never refund without me."
+                  placeholder="Scan a repository for orphaned code, then write a findings report."
                 ></textarea>
                 <div class="intent-actions">
                   <button class="btn btn-primary btn-sm btn-block" id="btnSketch">
@@ -134,7 +134,11 @@
             </div>
 
             <div class="run-box">
-              <textarea id="runMessage" placeholder="User message… e.g. Please refund order 88231"></textarea>
+              <label class="run-model-label">Run model</label>
+              <select id="runModel" class="model-select" style="width:100%;margin-bottom:8px">
+                <option value="simulator">Simulator (no cost)</option>
+              </select>
+              <textarea id="runMessage" placeholder="User message… e.g. Analyze this repo and summarize its structure"></textarea>
               <button class="btn btn-primary btn-block" id="btnRun" style="margin-top:8px" disabled>▶ Run system</button>
             </div>
 
@@ -145,8 +149,7 @@
               <div class="metric"><div class="k">Stop</div><div class="v" id="mStop">—</div></div>
             </div>
 
-            <div id="approvalsBox"></div>
-            <div class="muted" style="font-size:11px">Output</div>
+            <div class="muted" style="font-size:11px">Output <span id="runModelUsed" class="mono"></span></div>
             <div class="output" id="runOutput">Select a system, then run.</div>
           </div>
 

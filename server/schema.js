@@ -73,37 +73,33 @@ export const DEFAULT_TOOLS = [
   {
     id: "read_file",
     name: "read_file",
-    description: "Read a local workspace file by path.",
-    when: "Need file contents on demand (JIT context)",
-    whenNot: "Large bulk preloads — use pointers instead",
+    description:
+      "Read a real file from the agent's workspace folder by relative path. Reading a directory lists its entries.",
+    when: "Need file contents on demand (JIT context), or to explore the workspace tree",
+    whenNot: "Large bulk preloads — read only what the step needs",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Relative file path" },
+        path: { type: "string", description: "Path relative to the workspace root ('.' lists the root)" },
       },
       required: ["path"],
     },
-    mockResponse: (args) => ({
-      path: args.path,
-      content: `[mock] Contents of ${args.path}\nLine 1\nLine 2\nLine 3`,
-    }),
   },
   {
     id: "write_file",
     name: "write_file",
-    description: "Write or update a workspace file.",
-    when: "Persist draft artifacts",
-    whenNot: "Irreversible production writes without gate",
+    description:
+      "Write a real file inside the agent's workspace folder (parent folders created automatically).",
+    when: "Persist reports, templates, and draft artifacts",
+    whenNot: "Paths outside the workspace — they are refused",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
+        path: { type: "string", description: "Path relative to the workspace root" },
         content: { type: "string" },
       },
       required: ["path", "content"],
     },
-    mockResponse: (args) => ({ ok: true, path: args.path, bytes: (args.content || "").length }),
-    irreversible: false,
   },
   {
     id: "http_request",
@@ -155,42 +151,6 @@ export const DEFAULT_TOOLS = [
       },
     },
   },
-  {
-    id: "send_email",
-    name: "send_email",
-    description: "Send an email. IRREVERSIBLE — requires human gate by default.",
-    when: "Approved outbound communication",
-    whenNot: "Without human approval",
-    parameters: {
-      type: "object",
-      properties: {
-        to: { type: "string" },
-        subject: { type: "string" },
-        body: { type: "string" },
-      },
-      required: ["to", "subject", "body"],
-    },
-    irreversible: true,
-    mockResponse: (args) => ({ queued: true, to: args.to, subject: args.subject }),
-  },
-  {
-    id: "refund_payment",
-    name: "refund_payment",
-    description: "Issue a refund. IRREVERSIBLE — human gate required.",
-    when: "Approved refund after validation",
-    whenNot: "Without human approval or fraud checks",
-    parameters: {
-      type: "object",
-      properties: {
-        orderId: { type: "string" },
-        amount: { type: "number" },
-        reason: { type: "string" },
-      },
-      required: ["orderId", "amount"],
-    },
-    irreversible: true,
-    mockResponse: (args) => ({ refunded: true, orderId: args.orderId, amount: args.amount }),
-  },
 ];
 
 export function createEmptyAgent(partial = {}) {
@@ -237,7 +197,7 @@ export function createEmptyAgent(partial = {}) {
         "Complete the assigned subtask. Return a clean, structured result only.",
       judgeCriteria:
         partial.s1_orchestration?.judgeCriteria ||
-        "Pass if the goal is met, claims are supported, and no irreversible action was taken without approval.",
+        "Pass if the goal is met, claims are supported, and the output matches the exit condition.",
       escalationRule:
         partial.s1_orchestration?.escalationRule ||
         "Escalate to agentic lane when the request is open-ended or requires multi-step tool use.",
@@ -275,18 +235,6 @@ export function createEmptyAgent(partial = {}) {
       permissions: partial.s4_guardrails?.permissions || "least_privilege",
       validateInput: partial.s4_guardrails?.validateInput ?? true,
       validateOutput: partial.s4_guardrails?.validateOutput ?? true,
-      // Only list tools that are actually enabled + irreversible. Never invent send_email.
-      irreversibilityLine:
-        partial.s4_guardrails?.irreversibilityLine ||
-        (partial.s3_tools?.enabledToolIds || []).filter((id) =>
-          ["send_email", "refund_payment"].includes(id)
-        ),
-      humanGate:
-        partial.s4_guardrails?.humanGate ??
-        ((partial.s4_guardrails?.irreversibilityLine || []).length > 0 ||
-          (partial.s3_tools?.enabledToolIds || []).some((id) =>
-            ["send_email", "refund_payment"].includes(id)
-          )),
       breakers: {
         maxSpendUsd: partial.s4_guardrails?.breakers?.maxSpendUsd ?? 1.0,
         maxLoops: partial.s4_guardrails?.breakers?.maxLoops ?? 12,
@@ -294,7 +242,7 @@ export function createEmptyAgent(partial = {}) {
       },
       worstCase3am:
         partial.s4_guardrails?.worstCase3am ||
-        "Runaway loops / spend (no irreversible tools enabled by default).",
+        "Runaway loops / spend — breakers cover it.",
     },
 
     // ── S5 INSTRUMENTS ─────────────────────────────────────
@@ -353,13 +301,6 @@ export function scoreAgent(agent) {
     (agent.s3_tools?.enabledToolIds || []).length > 0 &&
       (agent.s3_tools?.enabledToolIds || []).length <= 8,
     !!agent.s4_guardrails?.worstCase3am,
-    // Pass if every enabled irreversible tool is on the line (empty line OK when none enabled)
-    (() => {
-      const enabled = new Set(agent.s3_tools?.enabledToolIds || []);
-      const irrevTools = ["send_email", "refund_payment"].filter((id) => enabled.has(id));
-      const line = new Set(agent.s4_guardrails?.irreversibilityLine || []);
-      return irrevTools.every((id) => line.has(id));
-    })(),
     agent.s4_guardrails?.breakers?.maxLoops > 0,
     agent.s5_instruments?.traces === true,
     (agent.s5_instruments?.evals || []).length >= 1,
@@ -412,23 +353,6 @@ export function shipChecklist(agent) {
       layer: "S4",
       label: "3 A.M. worst case written down",
       ok: !!agent.s4_guardrails?.worstCase3am,
-    },
-    {
-      id: "s4_line",
-      layer: "S4",
-      label: "Irreversibility line covers enabled irreversible tools",
-      ok: (() => {
-        const enabled = new Set(agent.s3_tools?.enabledToolIds || []);
-        const irrevTools = ["send_email", "refund_payment"].filter((id) =>
-          enabled.has(id)
-        );
-        if (!irrevTools.length) return true; // no invented gates required
-        const line = new Set(agent.s4_guardrails?.irreversibilityLine || []);
-        return (
-          irrevTools.every((id) => line.has(id)) &&
-          agent.s4_guardrails?.humanGate === true
-        );
-      })(),
     },
     {
       id: "s4_breakers",

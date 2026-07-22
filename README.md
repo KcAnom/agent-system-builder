@@ -1,10 +1,10 @@
-# Agent System Builder
+# Agent System Studio
 
-No-code builder for **agent systems** based on the [Agent System Design Blueprint](https://hyperautomationlabs.co/free/agent-blueprint) (Hyperautomation Labs).
+No-code studio for **designing and running agentic systems**, based on the [Agent System Design Blueprint](https://hyperautomationlabs.co/free/agent-blueprint) (Hyperautomation Labs).
 
 > A demo is a model with a prompt. A product is a model with a system around it.
 
-Build agents as engineered systems: core loop + seven subsystems (S1–S7), ship checklist, run console with traces, human gates, breakers, evals, and checkpoints.
+Describe intent → a model from your Pi instance designs the system → refine Core + S1–S7 → run it on a real model → inspect the streamed trace and output → eval → export.
 
 ## Quick start
 
@@ -14,63 +14,58 @@ npm install
 npm start
 ```
 
-Open **http://localhost:4747**
+Open **http://localhost:4747** (server binds to 127.0.0.1 only).
 
-### Live LLM (optional)
+## Models
 
-By default the runtime uses a **deterministic simulator** so you can learn the loop without API keys. To use a real model:
+All model access comes from your Pi instance:
 
-```bash
-export OPENAI_API_KEY=sk-...
-# optional:
-export OPENAI_BASE_URL=https://api.openai.com/v1
-export OPENAI_MODEL=gpt-4o-mini
-export OPENAI_SMALL_MODEL=gpt-4o-mini
-npm start
-```
+- `~/.pi/agent/models.json` — providers + models
+- `~/.pi/agent/auth.json` — credentials (API keys / OAuth)
 
-Any OpenAI-compatible endpoint works (`OPENAI_BASE_URL`).
+Supported provider APIs: `openai-completions`, `openai-responses`, `anthropic-messages`.
 
-## What you get
+- **Sketch** (left rail): pick an architect model, describe intent, review the sketch, create the system.
+- **Run** (right rail): pick a run model — any ready Pi model, or the free deterministic **simulator** that demonstrates the loop without spending tokens.
 
-| Layer | What the builder configures |
-|-------|-----------------------------|
+## What the studio configures
+
+| Layer | What you set |
+|-------|--------------|
 | **Core** | Goal, system prompt, exit condition, rule zero |
 | **S1 Orchestration** | 5 patterns (chain → route → parallel → orch/workers → judge), nesting, escalation |
-| **S2 Context + memory** | JIT context, compaction, external notes store |
-| **S3 Tools** | Tool bay (few/sharp), custom tools, irreversible flags |
-| **S4 Guardrails** | 3 A.M. case, irreversibility line, human gate, spend/loop/time breakers |
+| **S2 Context + memory** | JIT context, compaction threshold, external notes store |
+| **S3 Tools** | Tool bay (few/sharp), custom tools |
+| **S4 Guardrails** | 3 A.M. case, input/output validation, spend/loop/time breakers |
 | **S5 Instruments** | Traces, eval suite, outcome grading |
-| **S6 Power** | Model map by step, caching, parallelism, token/turn budgets |
-| **S7 Chassis** | Checkpoints, idempotent retries, degraded modes, versioning |
+| **S6 Power** | Model map by step, run model, token/turn budgets |
+| **S7 Chassis** | Checkpoints, retries, timeouts, versioning |
 
 ### Runtime features
 
-- Agent CRUD + import/export JSON bundles  
-- Run console with turn metrics and cost estimate  
-- **Human gate** for irreversible tools (`send_email`, `refund_payment`, …)  
-- **Trace flight recorder** per run  
-- **Checkpoint resume** after approval / crash  
-- **External memory** notes (S2 pump)  
-- **Eval suite** runner (outcome grading)  
-- Blueprint **score** + ship checklist  
+- Streaming runs — trace events render live as the loop executes
+- Token / spend / loop / time breakers actually enforced
+- Context compaction when past the threshold of the token budget
+- Checkpoint resume after crash
+- External memory notes (S2 pump)
+- Eval suite runner (simulator by default; real model optional)
+- Blueprint score + ship checklist
+- Agent CRUD + import/export JSON bundles
 
 ## Project layout
 
 ```
 agent-system-builder/
 ├── server/
-│   ├── index.js      # Express API + static host
+│   ├── index.js      # Express API + static host (127.0.0.1)
 │   ├── schema.js     # Agent schema (S1–S7), score, checklist
 │   ├── store.js      # JSON file persistence
-│   └── runtime.js    # Loop, tools, gates, breakers, evals
-├── public/
-│   ├── index.html    # No-code UI
-│   ├── styles.css
-│   └── app.js
-├── data/             # agents, runs, memory (gitignored-ish)
-├── package.json
-└── README.md
+│   ├── runtime.js    # Loop, tools, breakers, compaction, evals, streaming
+│   ├── pi-models.js  # Pi provider/credential resolution + chat calls
+│   └── planner.js    # Intent → system sketch via selected Pi model
+├── public/           # No-code UI (index.html, app.js, styles.css)
+├── data/             # agents, runs, memory
+└── docs/             # future plans (Cloudflare tunnel — deferred)
 ```
 
 ## API (short)
@@ -80,22 +75,13 @@ agent-system-builder/
 | GET | `/api/agents` | List |
 | POST | `/api/agents` | Create |
 | GET/PUT/DELETE | `/api/agents/:id` | Read / update / delete |
-| POST | `/api/agents/:id/run` | `{ message, approvals?, resumeRunId? }` |
-| POST | `/api/agents/:id/evals` | Run eval suite |
+| POST | `/api/agents/:id/run` | `{ message, modelRef?, resumeRunId? }` |
+| POST | `/api/agents/:id/run-stream` | Same, NDJSON streaming |
+| POST | `/api/agents/:id/evals` | Run eval suite `{ modelRef? }` |
 | GET | `/api/agents/:id/export` | Blueprint JSON bundle |
 | GET | `/api/agents/:id/memory` | Long-term notes |
-| GET | `/api/meta/patterns` | S1 pattern catalog |
-| GET | `/api/meta/tools` | Default tool bay |
-
-## Workflow
-
-1. **Library** → open a seeded agent or create one.  
-2. Walk **Core → S1…S7** like the printed sheet.  
-3. Tick the **Ship** checklist (score updates on save).  
-4. **Run** a message in the right rail — watch turns, tools, gates.  
-5. Approve irreversible actions when paused.  
-6. **Run evals** before you trust it.  
-7. **Export** the JSON bundle for version control.
+| GET | `/api/models` | Selectable Pi models + readiness |
+| POST | `/api/sketch` | `{ intent, modelRef }` → system sketch |
 
 ## Rule zero
 

@@ -116,6 +116,13 @@ function scoreClass(n) {
   return "low";
 }
 
+/** Single place dirty state changes — keeps the Save button honest. */
+function setDirty(v) {
+  state.dirty = v;
+  const btn = $("#btnSave");
+  if (btn) btn.textContent = v ? "Save •" : "Save";
+}
+
 function esc(s) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -130,312 +137,6 @@ function escAttr(s) {
 function freedomFor(pattern) {
   const p = state.patterns.find((x) => x.id === pattern);
   return p?.freedom || 1;
-}
-
-/** S4 line must mirror enabled irreversible tools — never keep orphan send_email gates. */
-function syncIrrevLineFromTools(agent) {
-  if (!agent?.s4_guardrails || !agent?.s3_tools) return;
-  const enabled = new Set(agent.s3_tools.enabledToolIds || []);
-  const next = [...IRREVERSIBLE_TOOL_IDS].filter((id) => enabled.has(id));
-  agent.s4_guardrails.irreversibilityLine = next;
-  agent.s4_guardrails.humanGate = next.length > 0;
-  if (!next.length) {
-    agent.s4_guardrails.worstCase3am =
-      agent.s4_guardrails.worstCase3am?.includes("email") ||
-      agent.s4_guardrails.worstCase3am?.includes("refund")
-        ? "No irreversible tools enabled; worst case is wasted spend/loops (breakers)."
-        : agent.s4_guardrails.worstCase3am;
-  }
-}
-
-// ── intent → system sketch ─────────────────────────────────
-/** Capabilities only added when intent clearly asks for them — never invent side-effects. */
-const INTENT_CAPABILITIES = [
-  {
-    id: "refund",
-    tools: ["refund_payment"],
-    // billing/charge alone is not enough — must mention refund/money-back style action
-    test: (s) =>
-      /\brefunds?\b|\bchargebacks?\b|\bmoney back\b|\breimburse/.test(s),
-  },
-  {
-    id: "email",
-    tools: ["send_email"],
-    // do NOT match bare "send" (too broad: send report, send to worker, etc.)
-    test: (s) =>
-      /\be-?mails?\b|\bsend (an |the )?e-?mail\b|\bemail (them|the customer|customers|users?)\b|\bnotify (them|the customer|customers)\b/.test(
-        s
-      ),
-  },
-  {
-    id: "http",
-    tools: ["http_request"],
-    test: (s) =>
-      /\bapi\b|\bhttp\b|\bwebhook\b|\bendpoint\b|\bintegrat/.test(s),
-  },
-  {
-    id: "files_write",
-    tools: ["write_file"],
-    test: (s) =>
-      /\bwrite (a |the )?file\b|\bsave (to|a) file\b|\bcreate (a )?file\b|\boutput (a )?file\b/.test(
-        s
-      ),
-  },
-  {
-    id: "files_read",
-    tools: ["read_file"],
-    test: (s) =>
-      /\bread (a |the )?file\b|\bopen (a |the )?file\b|\bfrom (the )?filesystem\b|\bworkspace\b/.test(
-        s
-      ),
-  },
-  {
-    id: "search",
-    tools: ["web_search"],
-    test: (s) =>
-      /\bsearch\b|\blook up\b|\blookup\b|\bresearch\b|\bweb\b|\binternet\b|\bnews\b|\bcite\b|\bcompetitor\b|\bcurrent\b/.test(
-        s
-      ),
-  },
-];
-
-const IRREVERSIBLE_TOOL_IDS = new Set(["send_email", "refund_payment"]);
-
-function detectCapabilities(lower) {
-  return INTENT_CAPABILITIES.filter((c) => c.test(lower));
-}
-
-function toolsFromCapabilities(caps) {
-  // Infrastructure only: memory pump (S2). No side-effect tools unless intent asks.
-  const tools = new Set(["memory_write", "memory_read"]);
-  for (const c of caps) for (const t of c.tools) tools.add(t);
-  return [...tools];
-}
-
-function irrevLineFromTools(toolIds) {
-  return toolIds.filter((id) => IRREVERSIBLE_TOOL_IDS.has(id));
-}
-
-function sketchFromIntent(text) {
-  const t = (text || "").trim();
-  const lower = t.toLowerCase();
-
-  const caps = detectCapabilities(lower);
-  const capIds = new Set(caps.map((c) => c.id));
-  const wantsRefund = capIds.has("refund");
-  const wantsEmail = capIds.has("email");
-  const wantsSearch = capIds.has("search");
-  const wantsResearch =
-    wantsSearch || /\bbrief\b|\bsummar|\binvestigate\b|\bexplore\b/.test(lower);
-
-  const wantsRoute =
-    wantsRefund ||
-    /\btriage\b|\bclassif|\broute\b|\bvs\b|\bticket\b|\bsupport\b/.test(lower);
-  const multiStep = /\band\b|,|;|\bthen\b|\bmulti/.test(lower) || t.length > 80;
-  const openEnded =
-    wantsResearch || /\binvestigate\b|\bexplore\b|\bfigure out\b/.test(lower);
-
-  let pattern = "prompt_chaining";
-  let reason = "Known steps → start with prompt chaining (rule zero).";
-  if (openEnded) {
-    pattern = "orchestrator_workers";
-    reason = "Open-ended work → orchestrator + workers.";
-  } else if (wantsRoute) {
-    pattern = "routing";
-    reason = "Distinct categories → routing lanes.";
-  } else if (multiStep) {
-    pattern = "prompt_chaining";
-    reason = "Decomposable steps → chain.";
-  }
-
-  const tools = toolsFromCapabilities(caps);
-  // Search only if intent asked — never auto-add web_search as a default.
-  // Open-ended without search language still gets no web_search (user can enable later).
-
-  const irrev = irrevLineFromTools(tools);
-  const inferred = caps.map((c) => c.id);
-  const sideEffectNote =
-    irrev.length > 0
-      ? `Gates only for tools you asked for: ${irrev.join(", ")}.`
-      : "No irreversible tools inferred — no invented gates (e.g. no send_email).";
-
-  const name = deriveName(t);
-  const goal = t || "Complete the user goal carefully and stop when done.";
-
-  const worst = wantsRefund
-    ? "Issues a refund without human approval."
-    : wantsEmail
-      ? "Sends email without human approval."
-      : irrev.length
-        ? `Ungated use of: ${irrev.join(", ")}.`
-        : "None of the enabled tools are irreversible; worst case is wasted spend/loops (breakers cover that).";
-
-  const evals = [];
-  if (wantsRefund) {
-    evals.push({
-      id: "ev_refund",
-      name: "Refund hits human gate",
-      input: "Please refund order 88231, charged twice.",
-      expected: "contains:human gate",
-    });
-    evals.push({
-      id: "ev_bug",
-      name: "Non-refund completes",
-      input: "App crashes when I click export. Help me triage.",
-      expected: "contains:complete",
-    });
-  } else if (wantsResearch) {
-    evals.push({
-      id: "ev_brief",
-      name: "Produces a result brief",
-      input: t.slice(0, 160) || "Write a short brief on the topic.",
-      expected: "contains:Result",
-    });
-  } else {
-    evals.push({
-      id: "ev1",
-      name: "Happy path completes",
-      input: t.slice(0, 160) || "Help me complete the goal.",
-      expected: "contains:complete",
-    });
-  }
-
-  // Routes: only add refund lane if refund was asked; otherwise generic support lanes without payment tools
-  let routes;
-  if (wantsRoute) {
-    routes = [];
-    if (wantsRefund) {
-      routes.push({
-        id: "r_refund",
-        name: "Refunds",
-        match: "refund|chargeback|reimburse|money back",
-        prompt: "Handle billing carefully; never refund without gate.",
-      });
-    }
-    routes.push({
-      id: "r_tech",
-      name: "Technical",
-      match: "bug|error|crash|export",
-      prompt: "Collect repro steps; draft triage notes (do not email unless that tool is enabled).",
-    });
-    routes.push({ id: "r_default", name: "Default", match: "default", prompt: "General assist." });
-  }
-
-  return {
-    name,
-    description: t.slice(0, 160),
-    intent: t,
-    reason: `${reason} ${sideEffectNote}`,
-    inferredCapabilities: inferred,
-    isAgent: openEnded || wantsRoute || multiStep,
-    core: {
-      goal,
-      systemPrompt: buildSystemPrompt({
-        wantsRefund,
-        wantsEmail,
-        wantsResearch,
-        pattern,
-        tools,
-      }),
-      exitCondition:
-        "Goal complete with a clear outcome, or human takeover, or budget/loop breaker.",
-    },
-    s1_orchestration: {
-      pattern,
-      nested: {
-        router: pattern === "routing" || openEnded,
-        workers: pattern === "orchestrator_workers",
-        judge: openEnded || pattern === "evaluator_optimizer",
-      },
-      escalationRule: openEnded
-        ? "Always agentic for open research / multi-system work."
-        : "Escalate only when request is open-ended or needs multi-step tools.",
-      judgeCriteria:
-        "Pass if goal met, claims supported, no ungated irreversible actions.",
-      routes,
-    },
-    s2_context: {
-      jitContext: true,
-      externalMemory: true,
-      systemPromptAltitude: "heuristics",
-      compactionThreshold: 0.75,
-    },
-    s3_tools: { enabledToolIds: tools },
-    s4_guardrails: {
-      worstCase3am: worst,
-      // Only gate tools that are actually enabled — never invent send_email etc.
-      irreversibilityLine: irrev,
-      // Human gate only needed when something irreversible is enabled
-      humanGate: irrev.length > 0,
-      validateInput: true,
-      validateOutput: true,
-      breakers: {
-        maxSpendUsd: openEnded ? 1.5 : 0.75,
-        maxLoops: openEnded ? 12 : 8,
-        maxTimeSec: 180,
-      },
-    },
-    s5_instruments: { traces: true, evals, outcomeGrading: true },
-    s6_power: {
-      modelMap: {
-        reason: "large",
-        classify: "small",
-        extract: "small",
-        format: "small",
-        summarize: "small",
-        judge: "large",
-      },
-      promptCaching: true,
-      parallelWhereIndependent: true,
-      tokenBudget: openEnded ? 8000 : 5000,
-      turnLimit: openEnded ? 12 : 8,
-    },
-    s7_chassis: {
-      checkpoints: true,
-      idempotentRetries: true,
-      degradedModes: true,
-      versionEverything: true,
-    },
-  };
-}
-
-function deriveName(t) {
-  if (!t) return "New System";
-  if (/\bsupport\b|\btriage\b|\bticket\b/i.test(t)) return "Support Triage System";
-  if (/\bresearch\b|\bbrief\b/i.test(t)) return "Research System";
-  if (/\brefund\b/i.test(t)) return "Refund Desk System";
-  const words = t.split(/\s+/).slice(0, 5).join(" ");
-  return words.length > 40 ? words.slice(0, 40) + "…" : words;
-}
-
-function buildSystemPrompt({ wantsRefund, wantsEmail, wantsResearch, pattern, tools }) {
-  const lines = [
-    "You are a careful agent system. Prefer the simplest path that works.",
-    "Use only the tools you have been given. Do not invent capabilities (email, refund, HTTP) that are not enabled.",
-    "Write important decisions to memory. Stop when the exit condition is met.",
-  ];
-  const enabled = tools || [];
-  if (enabled.length) {
-    lines.push(`Enabled tools: ${enabled.join(", ")}.`);
-  }
-  const gated = irrevLineFromTools(enabled);
-  if (gated.length) {
-    lines.push(
-      `Irreversible tools require human approval before firing: ${gated.join(", ")}.`
-    );
-  }
-  if (wantsResearch) {
-    lines.push("Prefer JIT retrieval. Do not invent citations. Summarize sources.");
-  }
-  // avoid mentioning email/refund in the prompt if those tools are not enabled
-  if (!wantsEmail && !enabled.includes("send_email")) {
-    /* no email instructions */
-  }
-  if (!wantsRefund && !enabled.includes("refund_payment")) {
-    /* no refund instructions */
-  }
-  lines.push(`Orchestration pattern: ${pattern}.`);
-  return lines.join(" ");
 }
 
 // ── fleet ──────────────────────────────────────────────────
@@ -472,11 +173,14 @@ function renderFleet() {
 
 // ── open system ────────────────────────────────────────────
 async function openAgent(id) {
+  if (state.dirty && state.agent && state.agent.id !== id) {
+    if (!confirm(`"${state.agent.name}" has unsaved changes. Discard them?`)) return;
+  }
   const data = await api(`/api/agents/${id}`);
   state.agent = data.agent;
   state.score = data.score;
   state.checklist = data.checklist;
-  state.dirty = false;
+  setDirty(false);
   state.lastRun = null;
   state.activeLayer = "core";
 
@@ -491,6 +195,7 @@ async function openAgent(id) {
   renderCanvas();
   renderInspector();
   resetRunPanel();
+  syncRunModelToAgent();
   loadRuns();
   loadMemory();
   renderFleet();
@@ -522,12 +227,9 @@ function layerStatus(id) {
     return n > 0 && n <= 8 ? "ok" : n ? "warn" : "bad";
   }
   if (id === "s4") {
-    const enabled = new Set(a.s3_tools?.enabledToolIds || []);
-    const irrev = ["send_email", "refund_payment"].filter((t) => enabled.has(t));
-    const line = new Set(a.s4_guardrails?.irreversibilityLine || []);
-    const lineOk = irrev.every((t) => line.has(t));
-    const gateOk = irrev.length === 0 || a.s4_guardrails?.humanGate;
-    return a.s4_guardrails?.worstCase3am && lineOk && gateOk ? "ok" : "warn";
+    return a.s4_guardrails?.worstCase3am && a.s4_guardrails?.breakers?.maxLoops
+      ? "ok"
+      : "warn";
   }
   if (id === "s5") {
     const n = a.s5_instruments?.evals?.length || 0;
@@ -569,6 +271,7 @@ function renderCanvas() {
 
   $$(".mod", grid).forEach((btn) => {
     btn.addEventListener("click", () => {
+      collectForm(); // keep edits from the current layer before switching
       state.activeLayer = btn.dataset.layer;
       renderCanvas();
       renderInspector();
@@ -720,6 +423,14 @@ function formS3(a) {
   return `
   <div class="card"><h3>Tool bay</h3><div class="tool-list" id="toolList">${tools}</div></div>
   <div class="card">
+    <h3>Workspace</h3>
+    <div class="field">
+      <label>Folder for read_file / write_file</label>
+      <input id="f-workspace" class="mono" placeholder="blank = sandboxed data/workspaces/${escAttr(a.id || "")}" value="${escAttr(a.s3_tools?.workspaceDir || "")}" />
+      <span class="hint">Absolute path (e.g. a repo to analyze). Tools cannot escape this folder — traversal and symlink escapes are refused.</span>
+    </div>
+  </div>
+  <div class="card">
     <h3>Custom tool</h3>
     <div class="form-row">
       <div class="field"><label>id</label><input id="f-custom-id" class="mono" placeholder="crm_lookup" /></div>
@@ -735,20 +446,16 @@ function formS4(a) {
   <div class="rings">
     <div class="ring"><div class="rt">Outer · Permissions</div>Least privilege. Read before write.</div>
     <div class="ring"><div class="rt">Middle · Validation</div>Injection in · side-effects out.</div>
-    <div class="ring"><div class="rt">Inner · Irreversibility</div>Cannot take back → human gate.</div>
-    <div class="ring"><div class="rt">Around · Breakers</div>Spend · loops · time fuses.</div>
+    <div class="ring"><div class="rt">Around · Breakers</div>Spend · loops · time · token fuses.</div>
   </div>
   <div class="form-grid">
     <div class="field"><label>3 A.M. worst case</label><textarea id="f-3am" rows="2">${esc(a.s4_guardrails?.worstCase3am || "")}</textarea></div>
-    <div class="field"><label>Irreversibility line</label><input id="f-irrev" class="mono" value="${escAttr((a.s4_guardrails?.irreversibilityLine || []).join(", "))}" /></div>
     <div class="form-row">
-      <div class="switch-row"><div><span>Human gate</span></div>
-        <label class="toggle"><input type="checkbox" id="f-humangate" ${a.s4_guardrails?.humanGate !== false ? "checked" : ""} /><i></i></label></div>
       <div class="switch-row"><div><span>Validate input</span></div>
         <label class="toggle"><input type="checkbox" id="f-val-in" ${a.s4_guardrails?.validateInput !== false ? "checked" : ""} /><i></i></label></div>
+      <div class="switch-row"><div><span>Validate output</span></div>
+        <label class="toggle"><input type="checkbox" id="f-val-out" ${a.s4_guardrails?.validateOutput !== false ? "checked" : ""} /><i></i></label></div>
     </div>
-    <div class="switch-row"><div><span>Validate output</span></div>
-      <label class="toggle"><input type="checkbox" id="f-val-out" ${a.s4_guardrails?.validateOutput !== false ? "checked" : ""} /><i></i></label></div>
     <div class="form-row">
       <div class="field"><label>Max spend USD</label><input type="number" id="f-max-spend" step="0.1" value="${b.maxSpendUsd ?? 1}" /></div>
       <div class="field"><label>Max loops</label><input type="number" id="f-max-loops" value="${b.maxLoops ?? 12}" /></div>
@@ -853,7 +560,7 @@ function formShip() {
   return `
   <div class="card">
     <h3>Blueprint score ${state.score}% · ${ok}/${total} checks</h3>
-    <p class="muted" style="margin:0;font-size:12px">Ship when instruments pass and irreversibility is gated.</p>
+    <p class="muted" style="margin:0;font-size:12px">Ship when instruments pass and breakers are set.</p>
   </div>
   <div class="check-list">${items}</div>`;
 }
@@ -864,7 +571,7 @@ function wireInspectorHandlers(layer) {
       btn.addEventListener("click", () => {
         collectForm();
         state.agent.s1_orchestration.pattern = btn.dataset.id;
-        state.dirty = true;
+        setDirty(true);
         renderCanvas();
         renderInspector();
       });
@@ -891,7 +598,7 @@ function wireInspectorHandlers(layer) {
         const row = inp.closest(".step-row");
         const i = Number(row.dataset.i);
         state.agent.s1_orchestration.chainSteps[i][inp.dataset.k] = inp.value;
-        state.dirty = true;
+        setDirty(true);
       });
     });
   }
@@ -902,9 +609,7 @@ function wireInspectorHandlers(layer) {
         if (inp.checked) set.add(inp.dataset.tool);
         else set.delete(inp.dataset.tool);
         state.agent.s3_tools.enabledToolIds = [...set];
-        // Keep S4 line honest: only gate irreversible tools that are actually enabled
-        syncIrrevLineFromTools(state.agent);
-        state.dirty = true;
+        setDirty(true);
         renderCanvas();
       });
     });
@@ -956,13 +661,6 @@ function wireInspectorHandlers(layer) {
     });
     $("#btnRunEvals")?.addEventListener("click", runEvals);
   }
-  $("#inspector")?.addEventListener(
-    "change",
-    () => {
-      state.dirty = true;
-    },
-    { once: true }
-  );
 }
 
 // ── collect / save ─────────────────────────────────────────
@@ -1020,16 +718,14 @@ function collectForm() {
       };
     }
   }
+  if ($("#f-workspace")) {
+    a.s3_tools = { ...a.s3_tools, workspaceDir: val("#f-workspace")?.trim() || "" };
+  }
   if ($("#f-3am") || layer === "s4") {
     if ($("#f-3am")) {
       a.s4_guardrails = {
         ...a.s4_guardrails,
         worstCase3am: val("#f-3am")?.trim() || "",
-        irreversibilityLine: (val("#f-irrev") || "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        humanGate: checked("#f-humangate"),
         validateInput: checked("#f-val-in"),
         validateOutput: checked("#f-val-out"),
         breakers: {
@@ -1094,7 +790,7 @@ async function saveAgent() {
   state.agent = data.agent;
   state.score = data.score;
   state.checklist = data.checklist;
-  state.dirty = false;
+  setDirty(false);
   updateStageChrome();
   renderCanvas();
   if (state.activeLayer === "ship") renderInspector();
@@ -1133,35 +829,122 @@ function updateBreakerCaps() {
 
 function resetRunPanel() {
   $("#runOutput").textContent = "Run the system to see the loop.";
+  $("#runModelUsed").textContent = "";
   $("#mTurns").textContent = "—";
   $("#mTokens").textContent = "—";
   $("#mCost").textContent = "—";
   $("#mStop").textContent = "—";
-  $("#approvalsBox").innerHTML = "";
   $("#traceList").innerHTML = `<div class="muted">Flight recorder appears after a run (S5).</div>`;
   state.lastRun = null;
   updateBreakerCaps();
 }
 
-async function runAgent(opts = {}) {
+/** One readable line per trace event, raw JSON behind a click. */
+function traceEventHtml(ev) {
+  const kind =
+    ev.type === "tool_result"
+      ? "tool"
+      : ev.type === "guardrail"
+        ? "guardrail"
+        : ev.type === "model_call"
+          ? "model"
+          : ev.type === "model_error"
+            ? "error"
+            : "";
+  let summary = ev.type;
+  if (ev.type === "run_start") {
+    summary = `▶ start · ${ev.pattern || ""} · ${ev.modelRef || "simulator"}`;
+  } else if (ev.type === "model_call") {
+    const head = ev.thought || ev.content || "";
+    summary = `turn ${ev.turn} · ${ev.stepType || "reason"} · ${String(head).slice(0, 100)}`;
+  } else if (ev.type === "tool_result") {
+    const ok = ev.result?.error ? `✗ ${ev.result.error}` : "✓ ok";
+    summary = `tool ${ev.name} → ${ok}`;
+  } else if (ev.type === "guardrail") {
+    summary = `guardrail · ${ev.action}${ev.reason ? ` — ${ev.reason}` : ""}`;
+  } else if (ev.type === "compaction") {
+    summary = `compaction · dropped ${ev.droppedMessages} messages at ${ev.tokensUsed} tokens`;
+  } else if (ev.type === "model_error") {
+    summary = `✗ model failed · ${ev.modelRef || ""} · ${ev.error || ""}`;
+  } else if (ev.type === "resume") {
+    summary = `resumed from checkpoint · turn ${ev.fromTurn}`;
+  }
+  const body = { ...ev };
+  delete body.at;
+  return `<div class="tev ${kind}">
+    <details>
+      <summary><span class="etype">${esc(ev.type)}</span> ${esc(summary)}</summary>
+      <pre>${esc(JSON.stringify(body, null, 2))}</pre>
+    </details>
+  </div>`;
+}
+
+function appendTraceEvent(ev) {
+  const tl = $("#traceList");
+  if (tl.dataset.live !== "1") {
+    tl.innerHTML = "";
+    tl.dataset.live = "1";
+  }
+  tl.insertAdjacentHTML("beforeend", traceEventHtml(ev));
+  tl.scrollTop = tl.scrollHeight;
+  // live metric updates while the run streams
+  if (ev.type === "model_call") {
+    $("#mTurns").textContent = ev.turn;
+    const t = Number($("#mTokens").textContent) || 0;
+    $("#mTokens").textContent = t + (ev.tokens || 0);
+    $("#bLoopsV").textContent = `${ev.turn} / ${state.agent?.s4_guardrails?.breakers?.maxLoops ?? 12}`;
+  }
+}
+
+async function runSystem(opts = {}) {
   if (!state.agent) return;
-  await saveAgent();
+  if (state.dirty) await saveAgent();
   const message = opts.message ?? $("#runMessage").value.trim();
   if (!message && !opts.resumeRunId) return toast("Enter a user message", "err");
+  const modelRef = $("#runModel")?.value || "simulator";
+
   $("#btnRun").disabled = true;
   $("#btnRun").textContent = "Running…";
+  $("#mTokens").textContent = "0";
+  $("#runOutput").textContent = "Streaming…";
+  $("#runModelUsed").textContent = `· ${modelRef}`;
+  const tl = $("#traceList");
+  tl.dataset.live = "0";
+  showOp("trace");
+
   try {
-    const run = await api(`/api/agents/${state.agent.id}/run`, {
+    const res = await fetch(`/api/agents/${state.agent.id}/run-stream`, {
       method: "POST",
-      body: JSON.stringify({
-        message,
-        approvals: opts.approvals || [],
-        resumeRunId: opts.resumeRunId,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, resumeRunId: opts.resumeRunId, modelRef }),
     });
-    state.lastRun = run;
-    renderRun(run);
-    if (run.trace?.length) showOp("trace");
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.type === "event") appendTraceEvent(msg.event);
+        else if (msg.type === "done") {
+          state.lastRun = msg.run;
+          renderRun(msg.run);
+          if (msg.run.status === "error") toast(msg.run.output || "Model failed", "err");
+        } else if (msg.type === "error") {
+          throw new Error(msg.error);
+        }
+      }
+    }
     loadRuns();
     loadMemory();
   } catch (err) {
@@ -1178,53 +961,17 @@ function renderRun(run) {
   $("#mCost").textContent = `$${(run.costUsd || 0).toFixed(4)}`;
   $("#mStop").textContent = run.stopReason || run.status;
   $("#runOutput").textContent = run.output || "(empty)";
+  $("#runModelUsed").textContent = `· ${run.modelRef || "simulator"}`;
   updateBreakerCaps();
-
-  const box = $("#approvalsBox");
-  if (run.pendingApprovals?.length) {
-    showOp("run");
-    box.innerHTML = run.pendingApprovals
-      .map(
-        (p) => `
-      <div class="approval">
-        <strong>Human gate · S4</strong>
-        <div style="margin:6px 0">${esc(p.reason)}</div>
-        <div class="mono" style="font-size:11px;margin-bottom:8px;font-family:var(--mono)">${esc(p.tool)} ${esc(JSON.stringify(p.arguments))}</div>
-        <button class="btn btn-good btn-sm" data-approve="${escAttr(p.callId)}">Approve & continue</button>
-      </div>`
-      )
-      .join("");
-    $$("[data-approve]", box).forEach((btn) => {
-      btn.addEventListener("click", () => {
-        runAgent({
-          message: run.input,
-          resumeRunId: run.id,
-          approvals: [btn.dataset.approve, ...run.pendingApprovals.map((p) => p.tool)],
-        });
-      });
-    });
-  } else box.innerHTML = "";
+  showOp("run");
 
   const tl = $("#traceList");
+  tl.dataset.live = "0";
   if (!run.trace?.length) {
     tl.innerHTML = `<div class="muted">No trace events.</div>`;
     return;
   }
-  tl.innerHTML = run.trace
-    .map((ev) => {
-      const kind =
-        ev.type === "tool_result"
-          ? "tool"
-          : ev.type === "guardrail"
-            ? "guardrail"
-            : ev.type === "model_call"
-              ? "model"
-              : "";
-      const body = { ...ev };
-      delete body.at;
-      return `<div class="tev ${kind}"><div class="etype">${esc(ev.type)}${ev.turn != null ? ` · turn ${ev.turn}` : ""}</div><pre>${esc(JSON.stringify(body, null, 2))}</pre></div>`;
-    })
-    .join("");
+  tl.innerHTML = run.trace.map(traceEventHtml).join("");
 }
 
 async function loadRuns() {
@@ -1240,9 +987,9 @@ async function loadRuns() {
     .map(
       (r) => `
     <div class="run-item" data-id="${r.id}">
-      <div class="rs ${escAttr(r.status)}">${esc(r.status)}</div>
+      <div class="rs ${escAttr(r.status)}">${esc(r.status)}${r.isEval ? ' <span class="badge good">eval</span>' : ""}</div>
       <div>${esc((r.input || "").slice(0, 90))}</div>
-      <div class="muted" style="font-size:10px;font-family:var(--mono)">${esc(r.id)} · $${(r.costUsd || 0).toFixed(4)}</div>
+      <div class="muted" style="font-size:10px;font-family:var(--mono)">${esc(r.modelRef || "simulator")} · $${(r.costUsd || 0).toFixed(4)}</div>
     </div>`
     )
     .join("");
@@ -1277,7 +1024,7 @@ async function loadMemory() {
 }
 
 async function runEvals() {
-  await saveAgent();
+  if (state.dirty) await saveAgent();
   const btn = $("#btnRunEvals");
   if (btn) btn.disabled = true;
   try {
@@ -1369,7 +1116,39 @@ async function loadPiModels() {
     if (sel.value) localStorage.setItem(SKETCH_MODEL_KEY, sel.value);
   });
 
+  populateRunModels();
   return data;
+}
+
+const RUN_MODEL_KEY = "agentStudio.runModelRef";
+
+/** Fill the operator-rail run-model picker: simulator + ready Pi models. */
+function populateRunModels() {
+  const sel = $("#runModel");
+  if (!sel) return;
+  const ready = state.piModels.filter((m) => m.ready);
+  sel.innerHTML =
+    `<option value="simulator">Simulator (no cost)</option>` +
+    ready
+      .map((m) => `<option value="${escAttr(m.ref)}">${esc(m.providerName)} · ${esc(m.modelName)}</option>`)
+      .join("");
+  const saved = localStorage.getItem(RUN_MODEL_KEY);
+  if (saved && (saved === "simulator" || ready.some((m) => m.ref === saved))) {
+    sel.value = saved;
+  }
+  sel.addEventListener("change", () => {
+    localStorage.setItem(RUN_MODEL_KEY, sel.value);
+  });
+}
+
+/** Prefer the agent's own run model when it's ready; else keep the current pick. */
+function syncRunModelToAgent() {
+  const sel = $("#runModel");
+  if (!sel || !state.agent) return;
+  const ref = state.agent.s6_power?.runModelRef;
+  if (ref && state.piModels.some((m) => m.ref === ref && m.ready)) {
+    sel.value = ref;
+  }
 }
 
 function selectedSketchModel() {
@@ -1386,21 +1165,18 @@ function showSketchInModal(sketch) {
 
   const fre = freedomFor(sketch.s1_orchestration?.pattern);
   const toolsList = (sketch.s3_tools?.enabledToolIds || []).join(", ") || "memory only";
-  const gateList = (sketch.s4_guardrails?.irreversibilityLine || []).length
-    ? sketch.s4_guardrails.irreversibilityLine.join(", ")
-    : "none — model enabled no irreversible tools";
   const caps = (sketch.inferredCapabilities || []).length
     ? sketch.inferredCapabilities.join(", ")
     : "(model listed none)";
 
   $("#sketchGrid").innerHTML = `
     <div class="sketch-row"><div class="ly">Model</div><div class="mono">${esc(sketch.modelRef || "")}</div></div>
-    <div class="sketch-row"><div class="ly">Caps</div><div><strong>${esc(caps)}</strong><br/><span class="muted">Server still strips invented irreversible tools.</span></div></div>
+    <div class="sketch-row"><div class="ly">Caps</div><div><strong>${esc(caps)}</strong></div></div>
     <div class="sketch-row"><div class="ly">S1</div><div><strong>${esc(sketch.s1_orchestration?.pattern || "")}</strong> · freedom ${fre}/5<br/><span class="muted">${esc(sketch.reason || "")}</span></div></div>
     <div class="sketch-row"><div class="ly">S3</div><div>Tools: <span class="mono">${esc(toolsList)}</span></div></div>
-    <div class="sketch-row"><div class="ly">S4</div><div>Gate: <span class="mono">${esc(gateList)}</span><br/><span class="muted">${esc(sketch.s4_guardrails?.worstCase3am || "")}</span></div></div>
+    <div class="sketch-row"><div class="ly">S4</div><div>Breakers: $${sketch.s4_guardrails?.breakers?.maxSpendUsd ?? "—"} · ${sketch.s4_guardrails?.breakers?.maxLoops ?? "—"} loops · ${sketch.s4_guardrails?.breakers?.maxTimeSec ?? "—"}s<br/><span class="muted">${esc(sketch.s4_guardrails?.worstCase3am || "")}</span></div></div>
     <div class="sketch-row"><div class="ly">S5</div><div>${(sketch.s5_instruments?.evals || []).length} eval(s) · traces ${sketch.s5_instruments?.traces ? "on" : "off"}</div></div>
-    <div class="sketch-row"><div class="ly">S6</div><div>Budget $${sketch.s4_guardrails?.breakers?.maxSpendUsd ?? "—"} · ${sketch.s6_power?.turnLimit ?? "—"} turns</div></div>
+    <div class="sketch-row"><div class="ly">S6</div><div>Token budget ${sketch.s6_power?.tokenBudget ?? "—"} · ${sketch.s6_power?.turnLimit ?? "—"} turns</div></div>
     <div class="sketch-row"><div class="ly">S7</div><div>Checkpoints · versioned · idempotent retries</div></div>`;
   $("#sketchModal").classList.add("open");
 }
@@ -1489,7 +1265,7 @@ async function boot() {
   });
 
   $("#btnSave").addEventListener("click", () => saveAgent().catch((e) => toast(e.message, "err")));
-  $("#btnRun").addEventListener("click", () => runAgent());
+  $("#btnRun").addEventListener("click", () => runSystem());
   $("#btnRefreshMem").addEventListener("click", loadMemory);
   $("#btnExport").addEventListener("click", () => {
     if (state.agent) window.open(`/api/agents/${state.agent.id}/export`, "_blank");
@@ -1540,6 +1316,15 @@ async function boot() {
   $("#intentInput").addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       $("#btnSketch").click();
+    }
+  });
+
+  // Dirty tracking + Cmd+S save
+  $("#inspector").addEventListener("change", () => setDirty(true));
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      if (state.agent) saveAgent().catch((err) => toast(err.message, "err"));
     }
   });
 }

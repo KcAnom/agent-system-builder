@@ -1,0 +1,124 @@
+{
+  "id": "agt_2HGjNfByWp",
+  "name": "Repository Feature Cloner",
+  "description": "feature cloning to create templates one called to run in a repository",
+  "version": "0.1.1",
+  "createdAt": "2026-07-19T06:10:15.190Z",
+  "updatedAt": "2026-07-19T06:17:21.224Z",
+  "core": {
+    "goal": "Analyze an existing feature in a repository, abstract it into a parameterized template, and write that template back so it can be called to scaffold new features.",
+    "systemPrompt": "You are a repository feature cloning agent. Your job is to (1) read and understand an existing feature or component in a repository, (2) extract its structural skeleton and conventions, (3) generalize it into a reusable template with clearly marked placeholders, and (4) write the template to an appropriate location in the repository. Always preserve the original project's conventions, naming, and directory structure. Use memory to store reusable patterns you discover.",
+    "exitCondition": "Template file(s) have been written to the repository and a summary of the cloned feature, its parameters, and usage instructions has been produced.",
+    "ruleZero": true
+  },
+  "s1_orchestration": {
+    "pattern": "routing",
+    "nested": {
+      "router": false,
+      "workers": false,
+      "judge": false
+    },
+    "chainSteps": [
+      {
+        "id": "step_1",
+        "name": "Analyze Source Feature",
+        "prompt": "Read the specified feature/component from the repository using read_file. Identify its files, structure, conventions, dependencies, and key variable parts. Store a summary in memory with tag 'feature_pattern'."
+      },
+      {
+        "id": "step_2",
+        "name": "Generate Template",
+        "prompt": "Using the analysis from step 1, produce a parameterized template version. Replace feature-specific names with clear placeholders (e.g. __FEATURE_NAME__). Preserve all conventions. Prepare the template content and target path."
+      },
+      {
+        "id": "step_3",
+        "name": "Write Template to Repo",
+        "prompt": "Write the generated template to the target path in the repository using write_file. Confirm the file was written. Produce a summary including: template name, location, parameters/placeholders, and a one-line usage example for invoking it."
+      }
+    ],
+    "routes": [],
+    "workerPrompt": "Complete the assigned subtask. Return a clean, structured result only.",
+    "judgeCriteria": "Pass if the goal is met, claims are supported, and no irreversible action was taken without approval.",
+    "escalationRule": "If the feature cannot be cleanly read or is ambiguous, stop and ask the user to specify the target feature path and desired template name."
+  },
+  "s2_context": {
+    "systemPromptAltitude": "heuristics",
+    "jitContext": true,
+    "compactionThreshold": 0.75,
+    "compactionKeep": [
+      "decisions",
+      "constraints",
+      "todos",
+      "open_threads"
+    ],
+    "externalMemory": true,
+    "pointers": [],
+    "seedNotes": []
+  },
+  "s3_tools": {
+    "enabledToolIds": [
+      "memory_write",
+      "memory_read",
+      "read_file",
+      "write_file"
+    ],
+    "customTools": [],
+    "returnStyle": "actionable"
+  },
+  "s4_guardrails": {
+    "permissions": "least_privilege",
+    "validateInput": true,
+    "validateOutput": true,
+    "breakers": {
+      "maxSpendUsd": 1,
+      "maxLoops": 10,
+      "maxTimeSec": 180
+    },
+    "worstCase3am": "Agent reads a feature, generates a template, and writes it to a new file path. Worst case is a poorly structured template file that the user can simply delete or overwrite. No external systems are touched."
+  },
+  "s5_instruments": {
+    "traces": true,
+    "evals": [
+      {
+        "id": "ev1",
+        "name": "Basic template generation",
+        "input": "Feature path: src/features/auth/login.ts. Template name: feature-template.",
+        "expected": "contains:placeholder"
+      },
+      {
+        "id": "ev2",
+        "name": "Preserves conventions",
+        "input": "Feature path: src/features/user/profile.ts. Template name: crud-template.",
+        "expected": "contains:usage"
+      }
+    ],
+    "driftNeedles": [
+      "success_rate",
+      "takeover_rate",
+      "cost_per_task"
+    ],
+    "outcomeGrading": true
+  },
+  "s6_power": {
+    "modelMap": {
+      "reason": "large",
+      "classify": "small",
+      "extract": "small",
+      "format": "small",
+      "summarize": "small",
+      "judge": "large"
+    },
+    "promptCaching": true,
+    "parallelWhereIndependent": true,
+    "tokenBudget": 6000,
+    "turnLimit": 10
+  },
+  "s7_chassis": {
+    "checkpoints": true,
+    "idempotentRetries": true,
+    "maxRetries": 2,
+    "degradedModes": true,
+    "versionEverything": true,
+    "timeoutsSec": 30
+  },
+  "checklist": {}
+}

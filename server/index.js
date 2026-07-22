@@ -1,5 +1,4 @@
 import express from "express";
-import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import {
@@ -27,24 +26,23 @@ import {
   loadMemory,
   saveMemory,
 } from "./runtime.js";
-import { listSelectableModels, getPiPaths } from "./pi-models.js";
+import { listSelectableModels, reloadRuntime, getPiPaths } from "./pi-models.js";
 import { sketchFromIntentWithModel } from "./planner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 4747;
 
-app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 seedIfEmpty();
 
 // ── Meta / blueprint reference ─────────────────────────────
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
   let pi = { readyCount: 0, modelsPath: null };
   try {
-    const listed = listSelectableModels();
+    const listed = await listSelectableModels();
     pi = {
       readyCount: listed.readyCount,
       totalModels: listed.models.length,
@@ -64,10 +62,11 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-/** Models from the user's real ~/.pi/agent/models.json + auth.json */
-app.get("/api/models", (_req, res) => {
+/** Models via Pi's ModelRuntime (builtin providers + models.json + auth.json). */
+app.get("/api/models", async (_req, res) => {
   try {
-    res.json(listSelectableModels());
+    await reloadRuntime(); // pick up edits to ~/.pi config
+    res.json(await listSelectableModels());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -197,19 +196,40 @@ app.delete("/api/agents/:id/memory", (req, res) => {
 app.post("/api/agents/:id/run", async (req, res) => {
   const agent = getAgent(req.params.id);
   if (!agent) return res.status(404).json({ error: "Agent not found" });
-  const { message, approvals, resumeRunId } = req.body || {};
+  const { message, resumeRunId, modelRef } = req.body || {};
   if (!message && !resumeRunId) {
     return res.status(400).json({ error: "message is required" });
   }
   try {
-    const run = await runAgent(agent, message || "", {
-      approvals: approvals || [],
-      resumeRunId,
-    });
+    const run = await runAgent(agent, message || "", { resumeRunId, modelRef });
     res.json(run);
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
   }
+});
+
+/** Streaming run — NDJSON lines: {type:"event",event} … {type:"done",run} */
+app.post("/api/agents/:id/run-stream", async (req, res) => {
+  const agent = getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const { message, resumeRunId, modelRef } = req.body || {};
+  if (!message && !resumeRunId) {
+    return res.status(400).json({ error: "message is required" });
+  }
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache");
+  const send = (obj) => res.write(JSON.stringify(obj) + "\n");
+  try {
+    const run = await runAgent(agent, message || "", {
+      resumeRunId,
+      modelRef,
+      onEvent: (ev) => send({ type: "event", event: ev }),
+    });
+    send({ type: "done", run });
+  } catch (err) {
+    send({ type: "error", error: err.message || String(err) });
+  }
+  res.end();
 });
 
 app.get("/api/agents/:id/runs", (req, res) => {
@@ -228,7 +248,7 @@ app.post("/api/agents/:id/evals", async (req, res) => {
   const agent = getAgent(req.params.id);
   if (!agent) return res.status(404).json({ error: "Agent not found" });
   try {
-    const report = await runEvals(agent);
+    const report = await runEvals(agent, { modelRef: req.body?.modelRef });
     res.json(report);
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
@@ -241,17 +261,16 @@ app.get("*", (req, res, next) => {
   res.sendFile(path.join(__dirname, "..", "public", "index.html"));
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "127.0.0.1", async () => {
   let piNote = "Pi models unavailable";
   try {
-    const listed = listSelectableModels();
-    piNote = `Pi models ready: ${listed.readyCount}/${listed.models.length}`;
+    const listed = await listSelectableModels();
+    piNote = `Pi models available: ${listed.readyCount}`;
   } catch (err) {
     piNote = `Pi models error: ${err.message}`;
   }
   console.log(`\n  ⚙  Agent System Studio`);
   console.log(`  → http://localhost:${PORT}`);
   console.log(`  → Blueprint layers S1–S7 ready`);
-  console.log(`  → ${piNote}`);
-  console.log(`  → Sketch uses selected model from ~/.pi/agent/models.json\n`);
+  console.log(`  → ${piNote} (via Pi ModelRuntime)\n`);
 });
